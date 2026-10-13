@@ -1,0 +1,5175 @@
+import asyncio
+from contextlib import closing
+import io
+import logging
+import math
+import os
+import random
+import sqlite3
+import time
+from typing import Literal
+
+import discord
+from discord import app_commands
+from PIL import Image, ImageDraw, ImageFont
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("discord_bot")
+
+BOT_OWNER_ID = 1079199747019112520
+MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
+MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
+MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
+MAIN_HOUSE_UPGRADE_NPC_BONUS = 10
+ECONOMY_DB_PATH = os.getenv(
+    "ECONOMY_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "economy.sqlite3"),
+)
+REWARD_SETTINGS = {
+    "daily": ("daily_claim_at", 24 * 60 * 60, 1, 100, "diária"),
+    "weekly": ("weekly_claim_at", 7 * 24 * 60 * 60, 100, 1000, "semanal"),
+    "monthly": ("monthly_claim_at", 30 * 24 * 60 * 60, 1000, 100000, "mensal"),
+}
+SLOT_SYMBOLS = ("🍒", "🍋", "🔔", "💎", "⭐", "7️⃣")
+SLOT_WEIGHTS = (35, 30, 18, 10, 5, 2)
+SLOT_TRIPLE_MULTIPLIERS = {
+    "🍒": 2,
+    "🍋": 3,
+    "🔔": 5,
+    "💎": 8,
+    "⭐": 12,
+    "7️⃣": 25,
+}
+SLOT_PAIR_MULTIPLIERS = {
+    "🍒": 1,
+    "🍋": 1,
+    "🔔": 2,
+    "💎": 3,
+    "⭐": 4,
+    "7️⃣": 6,
+}
+BETTING_ANIMALS = (
+    "Leão 🦁",
+    "Tigre 🐯",
+    "Elefante 🐘",
+    "Macaco 🐒",
+    "Raposa 🦊",
+    "Lobo 🐺",
+    "Coelho 🐰",
+    "Panda 🐼",
+)
+ANIMAL_BET_MULTIPLIERS = {1: 3, 2: 2, 3: 1.5}
+ANIMAL_BET_COOLDOWN = 24 * 60 * 60
+ROULETTE_RED_NUMBERS = frozenset(
+    {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+)
+DEFAULT_CASINO_CREATION_FEE = 1_000
+DEFAULT_CASINO_TAX_PERCENT = 10
+DEFAULT_MAIN_HOUSE_NPCS = 10
+CASINO_STARTING_NPCS = 3
+CASINO_MAX_NPCS = 100
+CASINO_NPC_HIRE_COST = 1_000
+CASINO_NPC_BET_MIN = 25
+CASINO_NPC_BET_MAX = 100
+NPC_ONLINE_INTERVAL_MIN_SECONDS = 15
+NPC_ONLINE_INTERVAL_MAX_SECONDS = 45
+NPC_OFFLINE_INTERVAL_SECONDS = 30 * 60
+NPC_BET_POLL_INTERVAL_SECONDS = 5
+CASINO_DAILY_REWARD = 100
+CASINO_WEEKLY_REWARD = 500
+CASINO_REWARD_SETTINGS = {
+    "daily": ("daily_claim_at", 24 * 60 * 60, CASINO_DAILY_REWARD, "diária"),
+    "weekly": (
+        "weekly_claim_at",
+        7 * 24 * 60 * 60,
+        CASINO_WEEKLY_REWARD,
+        "semanal",
+    ),
+}
+CASINO_UPGRADE_COSTS = (5_000, 15_000, 35_000)
+CASINO_TAX_REDUCTION_PER_LEVEL = 1
+CASINO_MINIMUM_TAX_PERCENT = 1
+CASINO_STARTING_TREASURY = 10_000
+CASINO_GAME_UNLOCKS = {
+    "moeda": 0,
+    "dados": 1,
+    "roleta": 2,
+    "cacaniquel": 3,
+}
+PVP_HOUSE_TAX_PERCENT = 5
+CASINO_PARTICIPANT_COMMANDS = frozenset(
+    {
+        "jogar_cassino",
+        "cacaniquel",
+        "corrida",
+        "moeda",
+        "dados",
+        "roleta",
+        "duelo",
+        "blackjack",
+    }
+)
+
+
+def initialize_economy() -> None:
+    database_directory = os.path.dirname(ECONOMY_DB_PATH)
+    if database_directory:
+        os.makedirs(database_directory, exist_ok=True)
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_accounts (
+                user_id INTEGER PRIMARY KEY,
+                balance INTEGER NOT NULL DEFAULT 0,
+                total_earned INTEGER NOT NULL DEFAULT 0,
+                total_lost INTEGER NOT NULL DEFAULT 0,
+                daily_claim_at INTEGER,
+                weekly_claim_at INTEGER,
+                monthly_claim_at INTEGER,
+                animal_bet_at INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_betting_channels (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_casino_autoroles (
+                guild_id INTEGER PRIMARY KEY,
+                role_id INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS casino_settings (
+                setting TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO casino_settings (setting, value) VALUES (?, ?)",
+            (
+                ("creation_fee", DEFAULT_CASINO_CREATION_FEE),
+                ("tax_percent", DEFAULT_CASINO_TAX_PERCENT),
+                ("main_house_npcs", DEFAULT_MAIN_HOUSE_NPCS),
+                ("npc_last_cycle_at", int(time.time())),
+                (
+                    "main_house_npc_next_bet_at",
+                    int(time.time()) + NPC_OFFLINE_INTERVAL_SECONDS,
+                ),
+                ("main_house_npc_owner_online", 0),
+                ("main_house_games", 0),
+                ("main_house_npc_games", 0),
+                ("main_house_upgrade_level", 0),
+                ("main_house_upgrade_costs_paid", 0),
+                ("main_house_npc_count_upgrade_level", 0),
+                ("main_house_npc_count_upgrade_costs_paid", 0),
+                ("main_house_npc_bet_upgrade_level", 0),
+                ("main_house_npc_bet_upgrade_costs_paid", 0),
+                ("main_house_upgrade_tracks_migrated", 0),
+            ),
+        )
+        upgrade_tracks_migrated = connection.execute(
+            """
+            SELECT value FROM casino_settings
+            WHERE setting = 'main_house_upgrade_tracks_migrated'
+            """
+        ).fetchone()[0]
+        if not upgrade_tracks_migrated:
+            legacy_upgrade_level = connection.execute(
+                """
+                SELECT value FROM casino_settings
+                WHERE setting = 'main_house_upgrade_level'
+                """
+            ).fetchone()[0]
+            connection.execute(
+                """
+                UPDATE casino_settings
+                SET value = ?
+                WHERE setting = 'main_house_npc_bet_upgrade_level'
+                """,
+                (legacy_upgrade_level,),
+            )
+            connection.execute(
+                """
+                UPDATE casino_settings
+                SET value = 1
+                WHERE setting = 'main_house_upgrade_tracks_migrated'
+                """
+            )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_casinos (
+                guild_id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                currency_name TEXT NOT NULL,
+                treasury INTEGER NOT NULL DEFAULT 0,
+                upgrade_level INTEGER NOT NULL DEFAULT 0,
+                npc_count INTEGER NOT NULL DEFAULT 3,
+                games_played INTEGER NOT NULL DEFAULT 0,
+                npc_games INTEGER NOT NULL DEFAULT 0,
+                house_earned INTEGER NOT NULL DEFAULT 0,
+                house_lost INTEGER NOT NULL DEFAULT 0,
+                tax_paid INTEGER NOT NULL DEFAULT 0,
+                upgrade_costs_paid INTEGER NOT NULL DEFAULT 0,
+                npc_hiring_costs INTEGER NOT NULL DEFAULT 0,
+                rewards_paid INTEGER NOT NULL DEFAULT 0,
+                npc_next_bet_at INTEGER NOT NULL DEFAULT 0,
+                npc_owner_online INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        casino_columns = {
+            column[1]
+            for column in connection.execute("PRAGMA table_info(guild_casinos)")
+        }
+        casino_migrations = {
+            "npc_count": CASINO_STARTING_NPCS,
+            "games_played": 0,
+            "npc_games": 0,
+            "house_earned": 0,
+            "house_lost": 0,
+            "tax_paid": 0,
+            "upgrade_costs_paid": 0,
+            "npc_hiring_costs": 0,
+            "rewards_paid": 0,
+            "npc_next_bet_at": 0,
+            "npc_owner_online": 0,
+        }
+        for column, default in casino_migrations.items():
+            if column not in casino_columns:
+                connection.execute(
+                    "ALTER TABLE guild_casinos "
+                    f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}"
+                )
+        connection.execute(
+            """
+            UPDATE guild_casinos SET npc_next_bet_at = ?
+            WHERE npc_next_bet_at = 0
+            """,
+            (int(time.time()) + NPC_OFFLINE_INTERVAL_SECONDS,),
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_casino_accounts (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                balance INTEGER NOT NULL DEFAULT 0,
+                total_earned INTEGER NOT NULL DEFAULT 0,
+                total_lost INTEGER NOT NULL DEFAULT 0,
+                daily_claim_at INTEGER,
+                weekly_claim_at INTEGER,
+                PRIMARY KEY (guild_id, user_id),
+                FOREIGN KEY (guild_id) REFERENCES guild_casinos(guild_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS house_bet_reservations (
+                reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                house_owner_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        stale_reservations = connection.execute(
+            """
+            SELECT user_id, amount FROM house_bet_reservations
+            """
+        ).fetchall()
+        for user_id, amount in stale_reservations:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)
+                """,
+                (user_id,),
+            )
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (amount, amount, user_id),
+            )
+        connection.execute("DELETE FROM house_bet_reservations")
+        columns = {
+            column[1]
+            for column in connection.execute("PRAGMA table_info(economy_accounts)")
+        }
+        if "total_earned" not in columns:
+            connection.execute(
+                "ALTER TABLE economy_accounts "
+                "ADD COLUMN total_earned INTEGER NOT NULL DEFAULT 0"
+            )
+        if "total_lost" not in columns:
+            connection.execute(
+                "ALTER TABLE economy_accounts "
+                "ADD COLUMN total_lost INTEGER NOT NULL DEFAULT 0"
+            )
+        if "animal_bet_at" not in columns:
+            connection.execute(
+                "ALTER TABLE economy_accounts "
+                "ADD COLUMN animal_bet_at INTEGER"
+            )
+
+
+def get_betting_channel_id(guild_id: int) -> int | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        setting = connection.execute(
+            "SELECT channel_id FROM guild_betting_channels WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    return setting[0] if setting else None
+
+
+def set_betting_channel(guild_id: int, channel_id: int | None) -> None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        if channel_id is None:
+            connection.execute(
+                "DELETE FROM guild_betting_channels WHERE guild_id = ?",
+                (guild_id,),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO guild_betting_channels (guild_id, channel_id)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id)
+                DO UPDATE SET channel_id = excluded.channel_id
+                """,
+                (guild_id, channel_id),
+            )
+
+
+def get_casino_autorole_id(guild_id: int) -> int | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        autorole = connection.execute(
+            "SELECT role_id FROM guild_casino_autoroles WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    return autorole[0] if autorole else None
+
+
+def set_casino_autorole(guild_id: int, role_id: int | None) -> None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        if role_id is None:
+            connection.execute(
+                "DELETE FROM guild_casino_autoroles WHERE guild_id = ?",
+                (guild_id,),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO guild_casino_autoroles (guild_id, role_id)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id)
+                DO UPDATE SET role_id = excluded.role_id
+                """,
+                (guild_id, role_id),
+            )
+
+
+async def ensure_betting_channel(interaction: discord.Interaction) -> bool:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Os jogos de aposta só podem ser usados em um servidor.",
+            ephemeral=True,
+        )
+        return False
+
+    configured_channel_id = get_betting_channel_id(guild.id)
+    if configured_channel_id is None or interaction.channel_id == configured_channel_id:
+        return True
+
+    await interaction.response.send_message(
+        f"Os jogos de aposta deste servidor só podem ser usados em "
+        f"<#{configured_channel_id}>.",
+        ephemeral=True,
+    )
+    return False
+
+
+async def ensure_not_house_owner(interaction: discord.Interaction) -> bool:
+    if interaction.user.id != get_house_owner_id():
+        return True
+    await interaction.response.send_message(
+        "O owner do bot é a banca principal e não pode apostar contra ela.",
+        ephemeral=True,
+    )
+    return False
+
+
+def get_balance(user_id: int) -> int:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        account = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return account[0] if account else 0
+
+
+def set_house_owner_id(owner_id: int) -> None:
+    if owner_id != BOT_OWNER_ID:
+        raise ValueError("O proprietário da casa principal é definido pelo BOT_OWNER_ID.")
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute(
+            """
+            INSERT INTO casino_settings (setting, value) VALUES ('house_owner_id', ?)
+            ON CONFLICT(setting) DO UPDATE SET value = excluded.value
+            """,
+            (owner_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO economy_accounts (user_id, balance) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET balance = excluded.balance
+            WHERE economy_accounts.balance = 0
+                AND economy_accounts.total_earned = 0
+                AND economy_accounts.total_lost = 0
+            """,
+            (owner_id, MAIN_HOUSE_STARTING_BALANCE),
+        )
+
+
+def get_house_owner_id() -> int:
+    return BOT_OWNER_ID
+
+
+def increment_house_stat(
+    connection: sqlite3.Connection,
+    setting: str,
+    amount: int = 1,
+) -> None:
+    if setting not in {"main_house_games", "main_house_npc_games"}:
+        raise ValueError(f"Estatística da casa desconhecida: {setting}")
+    connection.execute(
+        "UPDATE casino_settings SET value = value + ? WHERE setting = ?",
+        (amount, setting),
+    )
+
+
+def get_main_house_status() -> dict[str, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        account = connection.execute(
+            """
+            SELECT balance, total_earned, total_lost
+            FROM economy_accounts WHERE user_id = ?
+            """,
+            (BOT_OWNER_ID,),
+        ).fetchone()
+        house_stats = dict(
+            connection.execute(
+                """
+                SELECT setting, value FROM casino_settings
+                WHERE setting IN (
+                    'main_house_games', 'main_house_npc_games', 'main_house_npcs',
+                    'main_house_upgrade_costs_paid',
+                    'main_house_npc_count_upgrade_level',
+                    'main_house_npc_count_upgrade_costs_paid',
+                    'main_house_npc_bet_upgrade_level',
+                    'main_house_npc_bet_upgrade_costs_paid'
+                )
+                """
+            ).fetchall()
+        )
+        reservations = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM house_bet_reservations
+            WHERE house_owner_id = ?
+            """,
+            (BOT_OWNER_ID,),
+        ).fetchone()[0]
+        casino_count, local_treasury = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(treasury), 0) FROM guild_casinos"
+        ).fetchone()
+    balance, total_earned, total_lost = account or (0, 0, 0)
+    npc_count_upgrade_level = house_stats.get(
+        "main_house_npc_count_upgrade_level",
+        0,
+    )
+    npc_bet_upgrade_level = house_stats.get(
+        "main_house_npc_bet_upgrade_level",
+        0,
+    )
+    npc_count = house_stats.get("main_house_npcs", DEFAULT_MAIN_HOUSE_NPCS)
+    npc_bet_min, npc_bet_max = main_house_npc_bet_range(
+        npc_bet_upgrade_level
+    )
+    return {
+        "balance": balance,
+        "total_earned": total_earned,
+        "total_lost": total_lost,
+        "games": house_stats.get("main_house_games", 0),
+        "npc_games": house_stats.get("main_house_npc_games", 0),
+        "npc_count": npc_count,
+        "npc_count_upgrade_level": npc_count_upgrade_level,
+        "npc_bet_upgrade_level": npc_bet_upgrade_level,
+        "upgrade_costs_paid": house_stats.get(
+            "main_house_upgrade_costs_paid",
+            0,
+        )
+        + house_stats.get("main_house_npc_count_upgrade_costs_paid", 0)
+        + house_stats.get("main_house_npc_bet_upgrade_costs_paid", 0),
+        "npc_count_upgrade_costs_paid": house_stats.get(
+            "main_house_npc_count_upgrade_costs_paid",
+            0,
+        ),
+        "npc_bet_upgrade_costs_paid": house_stats.get(
+            "main_house_npc_bet_upgrade_costs_paid",
+            0,
+        ),
+        "next_npc_count_upgrade_cost": (
+            main_house_upgrade_cost(npc_count_upgrade_level)
+            if npc_count_upgrade_level < MAIN_HOUSE_UPGRADE_MAX_LEVEL
+            and npc_count < CASINO_MAX_NPCS
+            else 0
+        ),
+        "next_npc_bet_upgrade_cost": (
+            main_house_upgrade_cost(npc_bet_upgrade_level)
+            if npc_bet_upgrade_level < MAIN_HOUSE_UPGRADE_MAX_LEVEL
+            else 0
+        ),
+        "npc_bet_min": npc_bet_min,
+        "npc_bet_max": npc_bet_max,
+        "reservations": reservations,
+        "casino_count": casino_count,
+        "local_treasury": local_treasury,
+    }
+
+
+def main_house_upgrade_cost(level: int) -> int:
+    return (
+        MAIN_HOUSE_STARTING_BALANCE
+        * (level + 1)
+        * MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL
+        // 100
+    )
+
+
+def main_house_npc_bet_range(level: int) -> tuple[int, int]:
+    return (
+        CASINO_NPC_BET_MIN * (level + 1),
+        CASINO_NPC_BET_MAX * (level + 1),
+    )
+
+
+def upgrade_main_house(
+    user_id: int,
+    upgrade_type: str,
+    expected_level: int | None = None,
+    expected_npc_count: int | None = None,
+) -> tuple[str, int, int, int, int]:
+    if user_id != BOT_OWNER_ID:
+        return "not_owner", 0, 0, 0, 0
+    if upgrade_type not in {"npc_count", "npc_bet"}:
+        raise ValueError(f"Tipo de upgrade da casa principal inválido: {upgrade_type}")
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        settings = dict(
+            connection.execute(
+                """
+                SELECT setting, value FROM casino_settings
+                WHERE setting IN (
+                    'main_house_npcs', 'main_house_upgrade_costs_paid',
+                    'main_house_npc_count_upgrade_level',
+                    'main_house_npc_count_upgrade_costs_paid',
+                    'main_house_npc_bet_upgrade_level',
+                    'main_house_npc_bet_upgrade_costs_paid'
+                )
+                """
+            ).fetchall()
+        )
+        npc_count = settings["main_house_npcs"]
+        if upgrade_type == "npc_count":
+            level_setting = "main_house_npc_count_upgrade_level"
+            costs_setting = "main_house_npc_count_upgrade_costs_paid"
+            level = settings[level_setting]
+            if npc_count >= CASINO_MAX_NPCS:
+                return "max_count", 0, level, npc_count, 0
+        else:
+            level_setting = "main_house_npc_bet_upgrade_level"
+            costs_setting = "main_house_npc_bet_upgrade_costs_paid"
+            level = settings[level_setting]
+
+        account = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        balance = account[0] if account is not None else 0
+        if (
+            expected_level is not None
+            and level != expected_level
+            or expected_npc_count is not None
+            and npc_count != expected_npc_count
+        ):
+            return "changed", balance, level, npc_count, 0
+        if level >= MAIN_HOUSE_UPGRADE_MAX_LEVEL:
+            return "max_level", balance, level, npc_count, 0
+
+        cost = main_house_upgrade_cost(level)
+        if balance < cost:
+            return "insufficient", balance, level, npc_count, cost
+
+        new_level = level + 1
+        new_npc_count = (
+            min(
+                CASINO_MAX_NPCS,
+                npc_count + MAIN_HOUSE_UPGRADE_NPC_BONUS,
+            )
+            if upgrade_type == "npc_count"
+            else npc_count
+        )
+        new_costs_paid = settings[costs_setting] + cost
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (cost, cost, user_id),
+        )
+        connection.execute(
+            """
+            UPDATE casino_settings
+            SET value = ? WHERE setting = ?
+            """,
+            (new_level, level_setting),
+        )
+        connection.execute(
+            "UPDATE casino_settings SET value = ? WHERE setting = ?",
+            (new_costs_paid, costs_setting),
+        )
+        if upgrade_type == "npc_count":
+            connection.execute(
+                """
+                UPDATE casino_settings SET value = ?
+                WHERE setting = 'main_house_npcs'
+                """,
+                (new_npc_count,),
+            )
+        return "upgraded", balance - cost, new_level, new_npc_count, cost
+
+
+def get_casino_settings() -> tuple[int, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        settings = dict(
+            connection.execute(
+                """
+                SELECT setting, value FROM casino_settings
+                WHERE setting IN ('creation_fee', 'tax_percent')
+                """
+            ).fetchall()
+        )
+    return (
+        settings["creation_fee"],
+        settings["tax_percent"],
+    )
+
+
+def update_casino_settings(
+    *,
+    creation_fee: int | None = None,
+    tax_percent: int | None = None,
+) -> None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        if creation_fee is not None:
+            connection.execute(
+                "UPDATE casino_settings SET value = ? WHERE setting = 'creation_fee'",
+                (creation_fee,),
+            )
+        if tax_percent is not None:
+            connection.execute(
+                "UPDATE casino_settings SET value = ? WHERE setting = 'tax_percent'",
+                (tax_percent,),
+            )
+
+
+def format_coins(amount: int) -> str:
+    return f"{amount:,}".replace(",", ".")
+
+
+async def send_bet_result(
+    interaction: discord.Interaction,
+    *,
+    game: str,
+    bet: int,
+    choice: str,
+    result: str,
+    payout: int,
+    balance: int,
+) -> None:
+    net_change = payout - bet if payout else -bet
+    net_sign = "+" if net_change > 0 else ""
+    won = payout > 0
+    embed = discord.Embed(
+        title=f"{'🎉 VOCÊ GANHOU!' if won else '❌ VOCÊ PERDEU'} — {game}",
+        description=result,
+        color=discord.Color.green() if won else discord.Color.red(),
+    )
+    embed.add_field(name="Sua aposta", value=choice, inline=False)
+    embed.add_field(
+        name="🪙 Valor apostado",
+        value=f"{format_coins(bet)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="💰 Retorno total (inclui aposta)",
+        value=f"{format_coins(payout)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="📊 Lucro / prejuízo",
+        value=f"{net_sign}{format_coins(net_change)} moedas",
+        inline=True,
+    )
+    embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
+    await interaction.response.send_message(embed=embed)
+
+
+def get_leaderboard(user_ids: list[int]) -> list[tuple[int, int, int, int]]:
+    accounts: list[tuple[int, int, int, int]] = []
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        owner_setting = connection.execute(
+            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+        ).fetchone()
+        house_owner_id = owner_setting[0] if owner_setting else None
+        for start in range(0, len(user_ids), 900):
+            batch = user_ids[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            accounts.extend(
+                connection.execute(
+                    f"""
+                    SELECT user_id, balance, total_earned, total_lost
+                    FROM economy_accounts
+                    WHERE user_id IN ({placeholders})
+                    """,
+                    batch,
+                ).fetchall()
+            )
+
+    if house_owner_id is not None:
+        accounts = [
+            account for account in accounts if account[0] != house_owner_id
+        ]
+    return sorted(
+        accounts,
+        key=lambda account: (-account[1], -account[2], account[3], account[0]),
+    )[:10]
+
+
+def change_balance(user_id: int, amount: int) -> tuple[bool, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        if amount < 0:
+            updated = connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_lost = total_lost + ?
+                WHERE user_id = ? AND balance >= ?
+                """,
+                (amount, -amount, user_id, -amount),
+            )
+            if updated.rowcount == 0:
+                balance = connection.execute(
+                    "SELECT balance FROM economy_accounts WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()[0]
+                return False, balance
+        else:
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (amount, amount, user_id),
+            )
+
+        balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        return True, balance
+
+
+def settle_house_bet(
+    user_id: int,
+    house_owner_id: int,
+    bet: int,
+    payout: int,
+) -> tuple[bool, int, int]:
+    if user_id == house_owner_id:
+        return False, get_balance(user_id), get_balance(house_owner_id)
+    if bet <= 0 or payout < 0:
+        raise ValueError("A aposta precisa ser positiva e o retorno não pode ser negativo.")
+
+    player_change = payout - bet
+    house_change = -player_change
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.executemany(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            ((user_id,), (house_owner_id,)),
+        )
+        balances = {
+            account_id: balance
+            for account_id, balance in connection.execute(
+                """
+                SELECT user_id, balance FROM economy_accounts
+                WHERE user_id IN (?, ?)
+                """,
+                (user_id, house_owner_id),
+            )
+        }
+        player_balance = balances[user_id]
+        house_balance = balances[house_owner_id]
+        if player_balance < bet:
+            return False, player_balance, house_balance
+
+        reservations = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM house_bet_reservations
+            WHERE house_owner_id = ?
+            """,
+            (house_owner_id,),
+        ).fetchone()[0]
+        if house_change < 0 and house_balance - reservations < -house_change:
+            return False, player_balance, house_balance
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (
+                player_change,
+                max(player_change, 0),
+                max(-player_change, 0),
+                user_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (
+                house_change,
+                max(house_change, 0),
+                max(-house_change, 0),
+                house_owner_id,
+            ),
+        )
+        increment_house_stat(connection, "main_house_games")
+        player_balance += player_change
+        house_balance += house_change
+        return True, player_balance, house_balance
+
+
+def reserve_blackjack_bet(
+    user_id: int,
+    house_owner_id: int,
+    bet: int,
+) -> tuple[bool, int, str]:
+    if user_id == house_owner_id:
+        return False, get_balance(user_id), "owner"
+    if bet <= 0:
+        raise ValueError("A aposta precisa ser positiva.")
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.executemany(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            ((user_id,), (house_owner_id,)),
+        )
+        player_balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        house_balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (house_owner_id,),
+        ).fetchone()[0]
+        reserved = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM house_bet_reservations
+            WHERE house_owner_id = ?
+            """,
+            (house_owner_id,),
+        ).fetchone()[0]
+        if player_balance < bet:
+            return False, player_balance, "player"
+        if house_balance - reserved < bet:
+            return False, player_balance, "house"
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (bet, bet, user_id),
+        )
+        reservation = connection.execute(
+            """
+            INSERT INTO house_bet_reservations
+                (user_id, house_owner_id, amount, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, house_owner_id, bet, int(time.time())),
+        )
+        return True, player_balance - bet, str(reservation.lastrowid)
+
+
+def settle_blackjack_bet(
+    reservation_id: str,
+    user_id: int,
+    house_owner_id: int,
+    bet: int,
+    payout: int,
+) -> int:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        reservation = connection.execute(
+            """
+            SELECT amount FROM house_bet_reservations
+            WHERE reservation_id = ? AND user_id = ? AND house_owner_id = ?
+            """,
+            (int(reservation_id), user_id, house_owner_id),
+        ).fetchone()
+        if reservation is None or reservation[0] != bet:
+            raise RuntimeError("A reserva desta partida de blackjack não foi encontrada.")
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?
+            WHERE user_id = ?
+            """,
+            (payout, payout, user_id),
+        )
+        house_change = bet - payout
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (
+                house_change,
+                max(house_change, 0),
+                max(-house_change, 0),
+                house_owner_id,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM house_bet_reservations WHERE reservation_id = ?",
+            (int(reservation_id),),
+        )
+        increment_house_stat(connection, "main_house_games")
+        return connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+
+
+def place_duel_bets(
+    challenger_id: int,
+    opponent_id: int,
+    amount: int,
+) -> tuple[bool, int, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.executemany(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            ((challenger_id,), (opponent_id,)),
+        )
+        balances = {
+            user_id: balance
+            for user_id, balance in connection.execute(
+                """
+                SELECT user_id, balance FROM economy_accounts
+                WHERE user_id IN (?, ?)
+                """,
+                (challenger_id, opponent_id),
+            )
+        }
+        challenger_balance = balances[challenger_id]
+        opponent_balance = balances[opponent_id]
+        if challenger_balance < amount or opponent_balance < amount:
+            return False, challenger_balance, opponent_balance
+
+        connection.executemany(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (
+                (amount, amount, challenger_id),
+                (amount, amount, opponent_id),
+            ),
+        )
+        return True, challenger_balance - amount, opponent_balance - amount
+
+
+def settle_duel_bets(
+    challenger_id: int,
+    opponent_id: int,
+    amount: int,
+    winner_id: int | None,
+) -> tuple[int, int]:
+    if winner_id not in (None, challenger_id, opponent_id):
+        raise ValueError("O vencedor precisa ser um dos jogadores do desafio.")
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        house_owner_id = get_house_owner_id()
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (house_owner_id,),
+        )
+        if winner_id is None:
+            connection.executemany(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (
+                    (amount, amount, challenger_id),
+                    (amount, amount, opponent_id),
+                ),
+            )
+        else:
+            pot = amount * 2
+            house_fee = pot * PVP_HOUSE_TAX_PERCENT // 100
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (pot - house_fee, pot - house_fee, winner_id),
+            )
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (house_fee, house_fee, house_owner_id),
+            )
+
+        increment_house_stat(connection, "main_house_games")
+        balances = {
+            user_id: balance
+            for user_id, balance in connection.execute(
+                """
+                SELECT user_id, balance FROM economy_accounts
+                WHERE user_id IN (?, ?)
+                """,
+                (challenger_id, opponent_id),
+            )
+        }
+        return balances[challenger_id], balances[opponent_id]
+
+
+def settle_animal_house_bet(
+    user_id: int,
+    house_owner_id: int,
+    amount: int,
+    payout: int,
+) -> tuple[str, int, int]:
+    now = int(time.time())
+    if user_id == house_owner_id:
+        return "owner", get_balance(user_id), get_balance(house_owner_id)
+    if amount <= 0 or payout < 0:
+        raise ValueError("A aposta precisa ser positiva e o retorno não pode ser negativo.")
+
+    player_change = payout - amount
+    house_change = -player_change
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.executemany(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            ((user_id,), (house_owner_id,)),
+        )
+        player = connection.execute(
+            """
+            SELECT balance, animal_bet_at FROM economy_accounts
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        player_balance, last_bet = player
+        if last_bet is not None and now - last_bet < ANIMAL_BET_COOLDOWN:
+            return (
+                "cooldown",
+                player_balance,
+                ANIMAL_BET_COOLDOWN - (now - last_bet),
+            )
+        house_balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (house_owner_id,),
+        ).fetchone()[0]
+        reservations = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM house_bet_reservations
+            WHERE house_owner_id = ?
+            """,
+            (house_owner_id,),
+        ).fetchone()[0]
+        if player_balance < amount:
+            return "insufficient", player_balance, 0
+        if house_change < 0 and house_balance - reservations < -house_change:
+            return "house", player_balance, house_balance
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?,
+                animal_bet_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                player_change,
+                max(player_change, 0),
+                max(-player_change, 0),
+                now,
+                user_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (
+                house_change,
+                max(house_change, 0),
+                max(-house_change, 0),
+                house_owner_id,
+            ),
+        )
+        increment_house_stat(connection, "main_house_games")
+        return "accepted", player_balance + player_change, house_balance + house_change
+
+
+def get_guild_casino(guild_id: int) -> tuple[int, str, str, int, int] | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        casino = connection.execute(
+            """
+            SELECT owner_id, name, currency_name, treasury, upgrade_level
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+    return casino
+
+
+def get_guild_casino_status(
+    guild_id: int,
+) -> tuple[
+    int,
+    str,
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+] | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        return connection.execute(
+            """
+            SELECT owner_id, name, currency_name, treasury, upgrade_level,
+                   npc_count, games_played, npc_games, house_earned,
+                   house_lost, tax_paid, upgrade_costs_paid,
+                   npc_hiring_costs, rewards_paid
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+
+
+def hire_guild_casino_npcs(
+    guild_id: int,
+    user_id: int,
+    amount: int,
+) -> tuple[str, int, int]:
+    if amount <= 0:
+        raise ValueError("A quantidade de NPCs precisa ser positiva.")
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        casino = connection.execute(
+            """
+            SELECT owner_id, treasury, npc_count
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if casino is None:
+            return "missing", 0, 0
+
+        owner_id, treasury, current_npcs = casino
+        if owner_id != user_id:
+            return "not_owner", treasury, current_npcs
+        if current_npcs + amount > CASINO_MAX_NPCS:
+            return "max_npcs", treasury, current_npcs
+
+        cost = amount * CASINO_NPC_HIRE_COST
+        if treasury < cost:
+            return "insufficient", treasury, current_npcs
+
+        new_npc_count = current_npcs + amount
+        new_treasury = treasury - cost
+        connection.execute(
+            """
+            UPDATE guild_casinos
+            SET treasury = ?, npc_count = ?, npc_hiring_costs = npc_hiring_costs + ?
+            WHERE guild_id = ?
+            """,
+            (new_treasury, new_npc_count, cost, guild_id),
+        )
+        return "hired", new_treasury, new_npc_count
+
+
+def set_main_house_npc_count(amount: int) -> None:
+    if not 1 <= amount <= CASINO_MAX_NPCS:
+        raise ValueError("A casa principal precisa ter entre 1 e 100 NPCs.")
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute(
+            """
+            INSERT INTO casino_settings (setting, value)
+            VALUES ('main_house_npcs', ?)
+            ON CONFLICT(setting) DO UPDATE SET value = excluded.value
+            """,
+            (amount,),
+        )
+
+
+def npc_interval_seconds(owner_online: bool) -> int:
+    if owner_online:
+        return random.randint(
+            NPC_ONLINE_INTERVAL_MIN_SECONDS,
+            NPC_ONLINE_INTERVAL_MAX_SECONDS,
+        )
+    return NPC_OFFLINE_INTERVAL_SECONDS
+
+
+def run_npc_betting_cycle(
+    now: int | None = None,
+    main_house_online: bool = False,
+    online_owner_ids_by_guild: dict[int, set[int]] | None = None,
+) -> tuple[int, int]:
+    current_time = int(time.time()) if now is None else now
+    online_owner_ids_by_guild = online_owner_ids_by_guild or {}
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        settings = dict(
+            connection.execute(
+                """
+                SELECT setting, value FROM casino_settings
+                WHERE setting IN (
+                    'house_owner_id', 'main_house_npcs',
+                    'main_house_npc_bet_upgrade_level',
+                    'main_house_npc_next_bet_at',
+                    'main_house_npc_owner_online', 'tax_percent'
+                )
+                """
+            ).fetchall()
+        )
+        if "house_owner_id" not in settings:
+            return 0, 0
+
+        house_owner_id = settings["house_owner_id"]
+        main_npc_count = settings["main_house_npcs"]
+        main_npc_bet_min, main_npc_bet_max = main_house_npc_bet_range(
+            settings["main_house_npc_bet_upgrade_level"]
+        )
+        main_house_tax = settings["tax_percent"]
+        main_house_next_bet_at = settings["main_house_npc_next_bet_at"]
+        previous_main_house_online = bool(
+            settings["main_house_npc_owner_online"]
+        )
+        if previous_main_house_online != main_house_online:
+            main_house_next_bet_at = (
+                current_time + npc_interval_seconds(main_house_online)
+            )
+            connection.execute(
+                """
+                UPDATE casino_settings
+                SET value = CASE setting
+                    WHEN 'main_house_npc_next_bet_at' THEN ?
+                    WHEN 'main_house_npc_owner_online' THEN ?
+                END
+                WHERE setting IN (
+                    'main_house_npc_next_bet_at',
+                    'main_house_npc_owner_online'
+                )
+                """,
+                (main_house_next_bet_at, int(main_house_online)),
+            )
+
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (house_owner_id,),
+        )
+        house_balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (house_owner_id,),
+        ).fetchone()[0]
+        reservations = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM house_bet_reservations
+            WHERE house_owner_id = ?
+            """,
+            (house_owner_id,),
+        ).fetchone()[0]
+        casinos = connection.execute(
+            """
+            SELECT guild_id, owner_id, treasury, upgrade_level, npc_count,
+                   npc_next_bet_at, npc_owner_online
+            FROM guild_casinos
+            """
+        ).fetchall()
+        casino_progress = {
+            guild_id: {
+                "treasury": treasury,
+                "level": level,
+                "npc_count": npc_count,
+                "next_bet_at": next_bet_at,
+                "owner_online": bool(owner_online),
+                "npc_games": 0,
+                "house_earned": 0,
+                "house_lost": 0,
+                "tax_paid": 0,
+            }
+            for (
+                guild_id,
+                _,
+                treasury,
+                level,
+                npc_count,
+                next_bet_at,
+                owner_online,
+            ) in casinos
+        }
+
+        main_house_earned = 0
+        main_house_lost = 0
+        main_bets = 0
+        local_bets = 0
+
+        if main_house_next_bet_at <= current_time:
+            for _ in range(main_npc_count):
+                bet = random.randint(main_npc_bet_min, main_npc_bet_max)
+                house_change = bet if random.randint(1, 37) > 18 else -bet
+                if (
+                    house_change < 0
+                    and house_balance - reservations < -house_change
+                ):
+                    continue
+                house_balance += house_change
+                main_house_earned += max(house_change, 0)
+                main_house_lost += max(-house_change, 0)
+                main_bets += 1
+            main_house_next_bet_at = (
+                current_time + npc_interval_seconds(main_house_online)
+            )
+            connection.execute(
+                """
+                UPDATE casino_settings SET value = ?
+                WHERE setting = 'main_house_npc_next_bet_at'
+                """,
+                (main_house_next_bet_at,),
+            )
+
+        for guild_id, owner_id, *_ in casinos:
+            progress = casino_progress[guild_id]
+            owner_online = owner_id in online_owner_ids_by_guild.get(
+                guild_id,
+                set(),
+            )
+            if progress["owner_online"] != owner_online:
+                progress["owner_online"] = owner_online
+                progress["next_bet_at"] = (
+                    current_time + npc_interval_seconds(owner_online)
+                )
+            if progress["next_bet_at"] > current_time:
+                continue
+
+            treasury = progress["treasury"]
+            level = progress["level"]
+            for _ in range(progress["npc_count"]):
+                bet = random.randint(CASINO_NPC_BET_MIN, CASINO_NPC_BET_MAX)
+                house_change = bet if random.randint(1, 37) > 18 else -bet
+                if house_change < 0:
+                    if treasury < -house_change:
+                        continue
+                    treasury += house_change
+                    progress["house_lost"] += -house_change
+                else:
+                    progress["house_earned"] += house_change
+                    tax_percent = (
+                        max(
+                            CASINO_MINIMUM_TAX_PERCENT,
+                            main_house_tax
+                            - level * CASINO_TAX_REDUCTION_PER_LEVEL,
+                        )
+                        if main_house_tax > 0
+                        else 0
+                    )
+                    tax = (
+                        (house_change * tax_percent + 99) // 100
+                        if tax_percent > 0
+                        else 0
+                    )
+                    treasury += house_change - tax
+                    house_balance += tax
+                    main_house_earned += tax
+                    progress["tax_paid"] += tax
+                local_bets += 1
+                progress["npc_games"] += 1
+            progress["treasury"] = treasury
+            progress["next_bet_at"] = (
+                current_time + npc_interval_seconds(owner_online)
+            )
+
+        treasury_updates = [
+            (
+                progress["treasury"],
+                progress["npc_games"],
+                progress["npc_games"],
+                progress["house_earned"],
+                progress["house_lost"],
+                progress["tax_paid"],
+                progress["next_bet_at"],
+                int(progress["owner_online"]),
+                guild_id,
+            )
+            for guild_id, progress in casino_progress.items()
+        ]
+
+        connection.executemany(
+            """
+            UPDATE guild_casinos
+            SET treasury = ?, games_played = games_played + ?,
+                npc_games = npc_games + ?, house_earned = house_earned + ?,
+                house_lost = house_lost + ?, tax_paid = tax_paid + ?,
+                npc_next_bet_at = ?, npc_owner_online = ?
+            WHERE guild_id = ?
+            """,
+            treasury_updates,
+        )
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = ?, total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE user_id = ?
+            """,
+            (house_balance, main_house_earned, main_house_lost, house_owner_id),
+        )
+        increment_house_stat(connection, "main_house_games", main_bets)
+        increment_house_stat(connection, "main_house_npc_games", main_bets)
+        return main_bets, local_bets
+
+
+def get_guild_casino_balance(guild_id: int, user_id: int) -> int:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        account = connection.execute(
+            """
+            SELECT balance FROM guild_casino_accounts
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+    return account[0] if account else 0
+
+
+def create_guild_casino(
+    guild_id: int,
+    creator_id: int,
+    house_owner_id: int,
+    name: str,
+    currency_name: str,
+) -> tuple[str, int, int]:
+    creation_fee, _ = get_casino_settings()
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM guild_casinos WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone():
+            return "exists", get_balance(creator_id), get_balance(house_owner_id)
+
+        connection.executemany(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            ((creator_id,), (house_owner_id,)),
+        )
+        balances = {
+            account_id: balance
+            for account_id, balance in connection.execute(
+                """
+                SELECT user_id, balance FROM economy_accounts
+                WHERE user_id IN (?, ?)
+                """,
+                (creator_id, house_owner_id),
+            )
+        }
+        creator_balance = balances[creator_id]
+        house_balance = balances[house_owner_id]
+        if creator_id != house_owner_id and creator_balance < creation_fee:
+            return "insufficient", creator_balance, house_balance
+
+        if creator_id != house_owner_id:
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance - ?, total_lost = total_lost + ?
+                WHERE user_id = ?
+                """,
+                (creation_fee, creation_fee, creator_id),
+            )
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (creation_fee, creation_fee, house_owner_id),
+            )
+            creator_balance -= creation_fee
+        connection.execute(
+            """
+            INSERT INTO guild_casinos
+                (
+                    guild_id, owner_id, name, currency_name, treasury,
+                    npc_next_bet_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                creator_id,
+                name,
+                currency_name,
+                CASINO_STARTING_TREASURY,
+                int(time.time()) + NPC_OFFLINE_INTERVAL_SECONDS,
+            ),
+        )
+        return "created", creator_balance, house_balance + (
+            creation_fee if creator_id != house_owner_id else 0
+        )
+
+
+def claim_guild_casino_reward(
+    guild_id: int,
+    user_id: int,
+    reward_type: str,
+) -> tuple[str, int, int]:
+    claim_column, cooldown, reward, _ = CASINO_REWARD_SETTINGS[reward_type]
+    now = int(time.time())
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM guild_casinos WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone() is None:
+            return "missing", 0, 0
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO guild_casino_accounts (guild_id, user_id)
+            VALUES (?, ?)
+            """,
+            (guild_id, user_id),
+        )
+        account = connection.execute(
+            f"""
+            SELECT balance, {claim_column} FROM guild_casino_accounts
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        balance, last_claim = account
+        if last_claim is not None and now - last_claim < cooldown:
+            return "cooldown", balance, cooldown - (now - last_claim)
+        treasury = connection.execute(
+            "SELECT treasury FROM guild_casinos WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        if treasury < reward:
+            return "insufficient_treasury", balance, 0
+        connection.execute(
+            """
+            UPDATE guild_casinos
+            SET treasury = treasury - ?, rewards_paid = rewards_paid + ?
+            WHERE guild_id = ?
+            """,
+            (reward, reward, guild_id),
+        )
+        connection.execute(
+            f"""
+            UPDATE guild_casino_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?,
+                {claim_column} = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (reward, reward, now, guild_id, user_id),
+        )
+        return "claimed", balance + reward, reward
+
+
+def get_guild_casino_leaderboard(
+    guild_id: int,
+) -> tuple[str, str, list[tuple[int, int, int, int]]] | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        casino = connection.execute(
+            "SELECT owner_id, name, currency_name FROM guild_casinos WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        if casino is None:
+            return None
+        owner_id, name, currency_name = casino
+        main_house_owner = connection.execute(
+            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+        ).fetchone()
+        main_house_owner_id = (
+            main_house_owner[0] if main_house_owner is not None else -1
+        )
+        ranking = connection.execute(
+            """
+            SELECT user_id, balance, total_earned, total_lost
+            FROM guild_casino_accounts
+            WHERE guild_id = ? AND user_id NOT IN (?, ?)
+            ORDER BY balance DESC, total_earned DESC, total_lost ASC, user_id ASC
+            LIMIT 10
+            """,
+            (guild_id, owner_id, main_house_owner_id),
+        ).fetchall()
+    return name, currency_name, ranking
+
+
+def upgrade_guild_casino(
+    guild_id: int,
+    user_id: int,
+) -> tuple[str, int, int, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        casino = connection.execute(
+            """
+            SELECT owner_id, treasury, upgrade_level
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if casino is None:
+            return "missing", 0, 0, 0
+        owner_id, treasury, level = casino
+        if user_id != owner_id:
+            return "not_owner", treasury, level, 0
+        if level >= len(CASINO_UPGRADE_COSTS):
+            return "max_level", treasury, level, 0
+        cost = CASINO_UPGRADE_COSTS[level]
+        if treasury < cost:
+            return "insufficient", treasury, level, cost
+        house_owner = connection.execute(
+            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+        ).fetchone()
+        if house_owner is None:
+            raise RuntimeError("O owner do bot ainda não foi carregado para a banca.")
+        house_owner_id = house_owner[0]
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (house_owner_id,),
+        )
+        new_level = level + 1
+        new_treasury = treasury - cost
+        connection.execute(
+            """
+            UPDATE guild_casinos
+            SET treasury = ?, upgrade_level = ?,
+                upgrade_costs_paid = upgrade_costs_paid + ?
+            WHERE guild_id = ?
+            """,
+            (new_treasury, new_level, cost, guild_id),
+        )
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?
+            WHERE user_id = ?
+            """,
+            (cost, cost, house_owner_id),
+        )
+        return "upgraded", new_treasury, new_level, cost
+
+
+def settle_guild_casino_bet(
+    guild_id: int,
+    user_id: int,
+    house_owner_id: int,
+    bet: int,
+    payout: int,
+) -> tuple[str, int, int, int, int]:
+    if bet <= 0 or payout < 0:
+        raise ValueError("A aposta precisa ser positiva e o retorno não pode ser negativo.")
+    player_change = payout - bet
+    casino_gain = -player_change
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        casino = connection.execute(
+            """
+            SELECT treasury, upgrade_level
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if casino is None:
+            return "missing", 0, 0, 0, 0
+        treasury, level = casino
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO guild_casino_accounts (guild_id, user_id)
+            VALUES (?, ?)
+            """,
+            (guild_id, user_id),
+        )
+        player_balance = connection.execute(
+            """
+            SELECT balance FROM guild_casino_accounts
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()[0]
+        if player_balance < bet:
+            return "insufficient_player", player_balance, treasury, 0, 0
+
+        base_tax = connection.execute(
+            "SELECT value FROM casino_settings WHERE setting = 'tax_percent'"
+        ).fetchone()[0]
+        tax_percent = (
+            max(
+                CASINO_MINIMUM_TAX_PERCENT,
+                base_tax - level * CASINO_TAX_REDUCTION_PER_LEVEL,
+            )
+            if base_tax > 0
+            else 0
+        )
+        tax = (
+            (casino_gain * tax_percent + 99) // 100
+            if casino_gain > 0 and tax_percent > 0
+            else 0
+        )
+        treasury_change = casino_gain - tax
+        if treasury + treasury_change < 0:
+            return "insufficient_treasury", player_balance, treasury, tax_percent, 0
+
+        connection.execute(
+            """
+            UPDATE guild_casino_accounts
+            SET balance = balance + ?,
+                total_earned = total_earned + ?,
+                total_lost = total_lost + ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (
+                player_change,
+                max(player_change, 0),
+                max(-player_change, 0),
+                guild_id,
+                user_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE guild_casinos
+            SET treasury = treasury + ?, games_played = games_played + 1,
+                house_earned = house_earned + ?,
+                house_lost = house_lost + ?, tax_paid = tax_paid + ?
+            WHERE guild_id = ?
+            """,
+            (
+                treasury_change,
+                max(casino_gain, 0),
+                max(-casino_gain, 0),
+                tax,
+                guild_id,
+            ),
+        )
+        if tax:
+            connection.execute(
+                "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+                (house_owner_id,),
+            )
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (tax, tax, house_owner_id),
+            )
+        return "settled", player_balance + player_change, treasury + treasury_change, tax_percent, tax
+
+
+def place_animal_bet(user_id: int, amount: int) -> tuple[str, int, int]:
+    now = int(time.time())
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        account = connection.execute(
+            "SELECT balance, animal_bet_at FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        balance, last_bet = account
+        if last_bet is not None and now - last_bet < ANIMAL_BET_COOLDOWN:
+            return "cooldown", balance, ANIMAL_BET_COOLDOWN - (now - last_bet)
+        if balance < amount:
+            return "insufficient", balance, 0
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?,
+                animal_bet_at = ?
+            WHERE user_id = ?
+            """,
+            (amount, amount, now, user_id),
+        )
+        return "accepted", balance - amount, 0
+
+
+def claim_reward(user_id: int, reward_type: str) -> tuple[bool, int, int]:
+    claim_column, cooldown, minimum, maximum, _ = REWARD_SETTINGS[reward_type]
+    now = int(time.time())
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        last_claim = connection.execute(
+            f"SELECT {claim_column} FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        if last_claim is not None and now - last_claim < cooldown:
+            remaining = cooldown - (now - last_claim)
+            balance = connection.execute(
+                "SELECT balance FROM economy_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0]
+            return False, balance, remaining
+
+        reward = random.randint(minimum, maximum)
+        connection.execute(
+            f"""
+            UPDATE economy_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?,
+                {claim_column} = ?
+            WHERE user_id = ?
+            """,
+            (reward, reward, now, user_id),
+        )
+        balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        return True, balance, reward
+
+
+def format_remaining(seconds: int) -> str:
+    minutes = max(1, (seconds + 59) // 60)
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}min"
+    return f"{minutes}min"
+
+
+def hand_total(cards: list[str]) -> int:
+    total = sum(
+        10 if card in ("J", "Q", "K") else 11 if card == "A" else int(card)
+        for card in cards
+    )
+    aces = cards.count("A")
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+
+class BlackjackView(discord.ui.View):
+    def __init__(
+        self,
+        user: discord.User | discord.Member,
+        bet: int,
+        player_cards: list[str],
+        dealer_cards: list[str],
+        balance: int,
+        house_owner_id: int,
+        reservation_id: str,
+    ) -> None:
+        super().__init__(timeout=90)
+        self.user = user
+        self.bet = bet
+        self.player_cards = player_cards
+        self.dealer_cards = dealer_cards
+        self.balance = balance
+        self.house_owner_id = house_owner_id
+        self.reservation_id = reservation_id
+        self.message: discord.InteractionMessage | None = None
+        self.finished = False
+        self.result = "Escolha uma ação nos botões abaixo."
+        self.payout = 0
+        self.net_change = 0
+        self.turn_lock = asyncio.Lock()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message(
+                "Esta partida pertence a outra pessoa.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def create_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=(
+                "🎉 Você venceu!"
+                if self.finished and self.net_change > 0
+                else "❌ Você perdeu"
+                if self.finished and self.net_change < 0
+                else "🏁 Partida encerrada"
+                if self.finished
+                else "🃏 Blackjack"
+            ),
+            description=self.result,
+            color=(
+                discord.Color.green()
+                if self.finished and self.net_change > 0
+                else discord.Color.red()
+                if self.finished and self.net_change < 0
+                else discord.Color.gold()
+                if self.finished
+                else discord.Color.blue()
+            ),
+        )
+        embed.add_field(
+            name=f"Suas cartas — {hand_total(self.player_cards)}",
+            value="  •  ".join(self.player_cards),
+            inline=True,
+        )
+        if self.finished:
+            dealer_cards = "  •  ".join(self.dealer_cards)
+            dealer_total = hand_total(self.dealer_cards)
+        else:
+            dealer_cards = f"{self.dealer_cards[0]}  •  🂠"
+            dealer_total = "carta oculta"
+        embed.add_field(
+            name=f"Dealer — {dealer_total}",
+            value=dealer_cards,
+            inline=True,
+        )
+        embed.add_field(
+            name="Aposta",
+            value=f"🪙 {format_coins(self.bet)} moedas",
+            inline=False,
+        )
+        if self.finished:
+            embed.add_field(
+                name="💰 Retorno total (inclui aposta)",
+                value=f"{format_coins(self.payout)} moedas",
+                inline=True,
+            )
+            net_sign = "+" if self.net_change > 0 else ""
+            embed.add_field(
+                name="📊 Lucro / prejuízo",
+                value=f"{net_sign}{format_coins(self.net_change)} moedas",
+                inline=True,
+            )
+        else:
+            embed.description = (
+                f"{self.result}\n\n"
+                "Use **Comprar carta** para pedir outra ou **Parar** "
+                "para encerrar sua mão. O dealer compra até chegar a 17."
+            )
+        embed.set_footer(
+            text=f"Saldo atual: {format_coins(self.balance)} moedas"
+        )
+        return embed
+
+    def _resolve(self) -> None:
+        player_total = hand_total(self.player_cards)
+        if player_total > 21:
+            self.result = "Você estourou! O dealer venceu e a aposta foi perdida."
+            self.payout = 0
+        else:
+            while hand_total(self.dealer_cards) < 17:
+                self.dealer_cards.append(
+                    random.choice(
+                        ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+                    )
+                )
+
+            dealer_total = hand_total(self.dealer_cards)
+            if dealer_total > 21 or player_total > dealer_total:
+                self.payout = self.bet * 2
+                self.result = (
+                    f"🏆 Você venceu! Sua mão fez **{player_total}** "
+                    f"contra **{dealer_total}** do dealer."
+                )
+            elif player_total == dealer_total:
+                self.payout = self.bet
+                self.result = (
+                    f"🤝 Empate: ambos fizeram **{player_total}**. "
+                    "A aposta foi devolvida."
+                )
+            else:
+                self.payout = 0
+                self.result = (
+                    f"❌ O dealer venceu com **{dealer_total}** contra "
+                    f"**{player_total}**. A aposta foi perdida."
+                )
+
+        self.balance = settle_blackjack_bet(
+            self.reservation_id,
+            self.user.id,
+            self.house_owner_id,
+            self.bet,
+            self.payout,
+        )
+        self.net_change = self.payout - self.bet
+        self.finished = True
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    async def _apply_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        draw_card: bool,
+    ) -> None:
+        async with self.turn_lock:
+            if self.finished:
+                await interaction.response.send_message(
+                    "Esta partida já terminou.",
+                    ephemeral=True,
+                )
+                return
+
+            if draw_card:
+                cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+                self.player_cards.append(random.choice(cards))
+                player_total = hand_total(self.player_cards)
+                if player_total > 21:
+                    self._resolve()
+                elif player_total == 21:
+                    self.result = "Você chegou a 21! Vez do dealer..."
+                    self._resolve()
+                else:
+                    self.result = "Carta comprada. Compre outra ou pare."
+            else:
+                self._resolve()
+
+            await interaction.response.edit_message(
+                embed=self.create_embed(),
+                view=None if self.finished else self,
+            )
+
+    @discord.ui.button(
+        label="Comprar carta",
+        emoji="🃏",
+        style=discord.ButtonStyle.primary,
+    )
+    async def hit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        button.label = "Comprar outra"
+        await self._apply_action(interaction, draw_card=True)
+
+    @discord.ui.button(
+        label="Parar",
+        emoji="✋",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def stand(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        button.label = "Parar"
+        await self._apply_action(interaction, draw_card=False)
+
+    async def on_timeout(self) -> None:
+        async with self.turn_lock:
+            if self.finished:
+                return
+
+            self.finished = True
+            self.balance = settle_blackjack_bet(
+                self.reservation_id,
+                self.user.id,
+                self.house_owner_id,
+                self.bet,
+                self.bet,
+            )
+            self.payout = self.bet
+            self.net_change = 0
+            self.result = "Partida encerrada por inatividade. Sua aposta foi devolvida."
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            if self.message is not None:
+                await self.message.edit(embed=self.create_embed(), view=self)
+
+
+def slot_payout(reels: list[str], bet: int) -> tuple[int, str, int]:
+    if len(reels) != 3 or bet <= 0:
+        raise ValueError("A máquina exige três símbolos e uma aposta positiva.")
+
+    if reels[0] == reels[1] == reels[2]:
+        multiplier = SLOT_TRIPLE_MULTIPLIERS[reels[0]]
+        return bet * multiplier, f"Trinca de {reels[0]}", multiplier
+
+    for symbol in SLOT_SYMBOLS:
+        if reels.count(symbol) == 2:
+            multiplier = SLOT_PAIR_MULTIPLIERS[symbol]
+            return bet * multiplier, f"Par de {symbol}", multiplier
+
+    return 0, "Sem combinação premiada", 0
+
+
+def animal_bet_payout(
+    selected_animals: list[str],
+    drawn_animal: str,
+    bet: int,
+) -> tuple[int, float]:
+    if not 1 <= len(selected_animals) <= 3:
+        raise ValueError("Escolha de um a três animais.")
+    if len(set(selected_animals)) != len(selected_animals):
+        raise ValueError("Os animais escolhidos precisam ser diferentes.")
+    if any(animal not in BETTING_ANIMALS for animal in selected_animals):
+        raise ValueError("Um ou mais animais escolhidos são inválidos.")
+    if drawn_animal not in BETTING_ANIMALS or bet <= 0:
+        raise ValueError("Animal sorteado ou aposta inválidos.")
+
+    multiplier = ANIMAL_BET_MULTIPLIERS[len(selected_animals)]
+    payout = bet * 3 // 2 if len(selected_animals) == 3 else bet * int(multiplier)
+    return (payout if drawn_animal in selected_animals else 0), multiplier
+
+
+def draw_slot_symbol(
+    draw: ImageDraw.ImageDraw,
+    symbol: str,
+    center_x: int,
+    center_y: int,
+    symbol_font: ImageFont.ImageFont,
+    scale: int = 1,
+) -> None:
+    if symbol == "🍒":
+        draw.ellipse(
+            (center_x - 28 * scale, center_y, center_x, center_y + 34 * scale),
+            fill="#ed4264",
+        )
+        draw.ellipse(
+            (center_x - 2 * scale, center_y + 4 * scale, center_x + 26 * scale, center_y + 38 * scale),
+            fill="#ff5277",
+        )
+        draw.line(
+            (center_x - 8 * scale, center_y + 5 * scale, center_x + 3 * scale, center_y - 22 * scale, center_x + 19 * scale, center_y - 16 * scale),
+            fill="#55c878",
+            width=5 * scale,
+        )
+        draw.ellipse(
+            (center_x - 1 * scale, center_y - 25 * scale, center_x + 20 * scale, center_y - 13 * scale),
+            fill="#70dc84",
+        )
+    elif symbol == "🍋":
+        draw.ellipse(
+            (center_x - 31 * scale, center_y - 19 * scale, center_x + 31 * scale, center_y + 21 * scale),
+            fill="#ffdf53",
+            outline="#f3ae36",
+            width=3 * scale,
+        )
+        draw.polygon(
+            [(center_x - 30 * scale, center_y), (center_x - 39 * scale, center_y - 5 * scale), (center_x - 37 * scale, center_y + 6 * scale)],
+            fill="#ffdf53",
+        )
+        draw.polygon(
+            [(center_x + 30 * scale, center_y), (center_x + 39 * scale, center_y - 5 * scale), (center_x + 37 * scale, center_y + 6 * scale)],
+            fill="#ffdf53",
+        )
+    elif symbol == "🔔":
+        draw.ellipse(
+            (center_x - 25 * scale, center_y - 20 * scale, center_x + 25 * scale, center_y + 24 * scale),
+            fill="#ffc94f",
+            outline="#e99e32",
+            width=3 * scale,
+        )
+        draw.rectangle(
+            (center_x - 25 * scale, center_y, center_x + 25 * scale, center_y + 21 * scale),
+            fill="#ffc94f",
+        )
+        draw.rounded_rectangle(
+            (center_x - 32 * scale, center_y + 19 * scale, center_x + 32 * scale, center_y + 29 * scale),
+            radius=5 * scale,
+            fill="#e99e32",
+        )
+        draw.ellipse(
+            (center_x - 7 * scale, center_y + 26 * scale, center_x + 7 * scale, center_y + 39 * scale),
+            fill="#ffdc70",
+        )
+    elif symbol == "💎":
+        draw.polygon(
+            [
+                (center_x - 34 * scale, center_y - 12 * scale),
+                (center_x - 19 * scale, center_y - 30 * scale),
+                (center_x + 19 * scale, center_y - 30 * scale),
+                (center_x + 34 * scale, center_y - 12 * scale),
+                (center_x, center_y + 34 * scale),
+            ],
+            fill="#48d9ed",
+            outline="#b4f5ff",
+        )
+        draw.line(
+            (center_x - 19 * scale, center_y - 28 * scale, center_x, center_y + 30 * scale, center_x + 19 * scale, center_y - 28 * scale),
+            fill="#b4f5ff",
+            width=2 * scale,
+        )
+    elif symbol == "⭐":
+        points = []
+        for point in range(10):
+            angle = -90 + point * 36
+            radius = (34 if point % 2 == 0 else 15) * scale
+            points.append(
+                (
+                    center_x + int(radius * math.cos(math.radians(angle))),
+                    center_y + int(radius * math.sin(math.radians(angle))),
+                )
+            )
+        draw.polygon(points, fill="#ffd84d", outline="#fff0a6")
+    else:
+        draw.text(
+            (center_x, center_y),
+            "7",
+            font=symbol_font,
+            fill="#ff5478",
+            anchor="mm",
+            stroke_width=2 * scale,
+            stroke_fill="#a72850",
+        )
+
+
+def render_slot_gif(reels: list[str], payout: int, multiplier: int) -> io.BytesIO:
+    width, height = 600, 330
+    background = (18, 23, 48)
+    reel_stops = (9, 14, 19)
+    frame_count = 20
+    frames: list[Image.Image] = []
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 27)
+        caption_font = ImageFont.truetype(font_path, 18)
+        small_font = ImageFont.truetype(font_path, 14)
+        symbol_font = ImageFont.truetype(font_path, 66)
+    except OSError:
+        title_font = ImageFont.load_default()
+        caption_font = ImageFont.load_default()
+        small_font = ImageFont.load_default()
+        symbol_font = ImageFont.load_default()
+
+    for frame_index in range(frame_count):
+        image = Image.new("RGB", (width, height), background)
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (30, 20, width - 30, height - 20),
+            radius=28,
+            fill="#252c52",
+            outline="#f7c957",
+            width=5,
+        )
+        draw.text((width // 2, 54), "CAÇA-NÍQUEL", font=title_font, fill="#ffe18a", anchor="mm")
+        draw.rounded_rectangle(
+            (67, 82, width - 67, 235),
+            radius=20,
+            fill="#11152e",
+            outline="#d9ad56",
+            width=4,
+        )
+
+        for reel_index, center_x in enumerate((160, 300, 440)):
+            draw.rounded_rectangle(
+                (center_x - 57, 96, center_x + 57, 221),
+                radius=14,
+                fill="#f6f1df",
+                outline="#ffffff",
+                width=3,
+            )
+            if frame_index >= reel_stops[reel_index]:
+                symbol = reels[reel_index]
+            else:
+                symbol = random.choice(SLOT_SYMBOLS)
+            draw_slot_symbol(draw, symbol, center_x, 157, symbol_font)
+
+        if frame_index == frame_count - 1:
+            banner_color = "#53d89a" if payout else "#c6c9d8"
+            banner_text = f"PREMIO  x{multiplier}" if payout else "TENTE DE NOVO"
+            draw.rounded_rectangle(
+                (130, 254, 470, 298),
+                radius=18,
+                fill="#171b36",
+                outline=banner_color,
+                width=2,
+            )
+            draw.text(
+                (width // 2, 276),
+                banner_text,
+                font=caption_font,
+                fill=banner_color,
+                anchor="mm",
+            )
+        else:
+            draw.text(
+                (width // 2, 276),
+                "GIRANDO...",
+                font=small_font,
+                fill="#cbd0e8",
+                anchor="mm",
+            )
+
+        frames.append(image)
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[75] * (frame_count - 1) + [1200],
+        optimize=False,
+        disposal=2,
+    )
+    output.seek(0)
+    return output
+
+
+initialize_economy()
+
+
+class BotDiscord(discord.Client):
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.members = True
+        intents.presences = True
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.house_owner_id: int | None = None
+        self.npc_betting_task: asyncio.Task[None] | None = None
+
+    async def setup_hook(self) -> None:
+        self.house_owner_id = BOT_OWNER_ID
+        set_house_owner_id(self.house_owner_id)
+
+        guild_id = os.getenv("DISCORD_GUILD_ID")
+        if guild_id:
+            try:
+                guild = discord.Object(id=int(guild_id))
+            except ValueError as error:
+                raise RuntimeError("DISCORD_GUILD_ID precisa ser um ID numérico.") from error
+
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+            logger.info("Sincronizados %d comandos slash no servidor %s.", len(synced), guild_id)
+            return
+
+        synced = await self.tree.sync()
+        logger.info("Sincronizados %d comandos slash globalmente.", len(synced))
+
+    async def on_ready(self) -> None:
+        if self.user is not None:
+            logger.info("Bot conectado como %s (%s).", self.user, self.user.id)
+        if self.npc_betting_task is None or self.npc_betting_task.done():
+            self.npc_betting_task = asyncio.create_task(
+                self.npc_betting_loop(),
+                name="npc-betting-loop",
+            )
+
+    async def npc_betting_loop(self) -> None:
+        while not self.is_closed():
+            try:
+                online_owner_ids_by_guild = {
+                    guild.id: {
+                        member.id
+                        for member in guild.members
+                        if member.status is not discord.Status.offline
+                    }
+                    for guild in self.guilds
+                }
+                main_house_online = any(
+                    BOT_OWNER_ID in owner_ids
+                    for owner_ids in online_owner_ids_by_guild.values()
+                )
+                main_bets, local_bets = run_npc_betting_cycle(
+                    main_house_online=main_house_online,
+                    online_owner_ids_by_guild=online_owner_ids_by_guild,
+                )
+                if main_bets or local_bets:
+                    logger.info(
+                        "Ciclo de apostas NPC concluído: %d apostas na casa "
+                        "principal e %d em cassinos locais.",
+                        main_bets,
+                        local_bets,
+                    )
+            except sqlite3.Error:
+                logger.exception("Falha ao processar as apostas periódicas dos NPCs.")
+            await asyncio.sleep(NPC_BET_POLL_INTERVAL_SECONDS)
+
+
+bot = BotDiscord()
+
+
+@bot.event
+async def on_app_command_completion(
+    interaction: discord.Interaction,
+    command: app_commands.Command,
+) -> None:
+    guild = interaction.guild
+    if guild is None or command.name not in CASINO_PARTICIPANT_COMMANDS:
+        return
+
+    configured_channel_id = get_betting_channel_id(guild.id)
+    if (
+        configured_channel_id is not None
+        and interaction.channel_id != configured_channel_id
+    ):
+        return
+
+    role_id = get_casino_autorole_id(guild.id)
+    if role_id is None:
+        return
+
+    role = guild.get_role(role_id)
+    if role is None:
+        logger.error(
+            "O cargo de autorole %s configurado para o servidor %s não existe.",
+            role_id,
+            guild.id,
+        )
+        try:
+            await interaction.followup.send(
+                "O autorole do cassino foi removido do servidor. "
+                "Peça ao dono do bot para configurá-lo novamente.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "Não foi possível avisar sobre o autorole ausente no servidor %s.",
+                guild.id,
+            )
+        return
+
+    member = interaction.user
+    if not isinstance(member, discord.Member) or role in member.roles:
+        return
+
+    try:
+        await member.add_roles(
+            role,
+            reason="Participou de um jogo ou aposta do cassino.",
+        )
+    except discord.HTTPException:
+        logger.exception(
+            "Falha ao atribuir o autorole %s ao membro %s no servidor %s.",
+            role.id,
+            member.id,
+            guild.id,
+        )
+        try:
+            await interaction.followup.send(
+                "Não consegui atribuir o cargo de participante do cassino. "
+                "Verifique as permissões e a posição do cargo do bot.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "Não foi possível avisar o membro %s sobre a falha de "
+                "autorole no servidor %s.",
+                member.id,
+                guild.id,
+            )
+
+
+class DuelView(discord.ui.View):
+    def __init__(
+        self,
+        challenger: discord.User | discord.Member,
+        opponent: discord.User | discord.Member,
+        bet: int,
+        game: str,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.challenger = challenger
+        self.opponent = opponent
+        self.bet = bet
+        self.game = game
+        self.accepted = False
+        self.finished = False
+        self.choices: dict[int, str] = {}
+        self.challenger_balance = get_balance(challenger.id)
+        self.opponent_balance = get_balance(opponent.id)
+        self.result = (
+            f"{opponent.mention}, aceite ou recuse o desafio. "
+            f"Cada jogador aposta **{format_coins(bet)} moedas**. "
+            "Quem vencer recebe o pote; em caso de empate, as apostas voltam."
+        )
+        self.message: discord.InteractionMessage | None = None
+        self.turn_lock = asyncio.Lock()
+
+    def create_embed(self) -> discord.Embed:
+        if self.finished and self.result.startswith("🤝"):
+            title = "🤝 EMPATE"
+            color = discord.Color.gold()
+        elif self.finished and self.result.startswith("🎉"):
+            title = "🎉 DESAFIO CONCLUÍDO"
+            color = discord.Color.green()
+        elif self.finished and self.result.startswith("⏰"):
+            title = "⏰ DESAFIO EXPIRADO"
+            color = discord.Color.gold()
+        elif self.finished:
+            title = "🏁 DESAFIO ENCERRADO"
+            color = discord.Color.red()
+        else:
+            title = f"⚔️ DESAFIO — {self.game.upper()}"
+            color = discord.Color.blue()
+
+        embed = discord.Embed(title=title, description=self.result, color=color)
+        embed.add_field(
+            name="Jogadores",
+            value=f"{self.challenger.mention} vs. {self.opponent.mention}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Aposta de cada jogador",
+            value=f"{format_coins(self.bet)} moedas",
+            inline=True,
+        )
+        embed.add_field(
+            name="Pote",
+            value=f"{format_coins(self.bet * 2)} moedas",
+            inline=True,
+        )
+        if self.accepted or self.finished:
+            embed.add_field(
+                name=f"Saldo de {self.challenger.display_name}",
+                value=f"{format_coins(self.challenger_balance)} moedas",
+                inline=True,
+            )
+            embed.add_field(
+                name=f"Saldo de {self.opponent.display_name}",
+                value=f"{format_coins(self.opponent_balance)} moedas",
+                inline=True,
+            )
+        return embed
+
+    def _disable_all_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    async def _finish_round(self, winner_id: int | None, result: str) -> None:
+        self.finished = True
+        self.result = result
+        (
+            self.challenger_balance,
+            self.opponent_balance,
+        ) = settle_duel_bets(
+            self.challenger.id,
+            self.opponent.id,
+            self.bet,
+            winner_id,
+        )
+        self._disable_all_buttons()
+        self.stop()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in (self.challenger.id, self.opponent.id):
+            await interaction.response.send_message(
+                "Este desafio é privado entre os dois jogadores mencionados.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Aceitar desafio",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+    )
+    async def accept(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if not await ensure_betting_channel(interaction):
+            return
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message(
+                "Somente a pessoa desafiada pode aceitar.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.turn_lock:
+            if self.accepted or self.finished:
+                await interaction.response.send_message(
+                    "Este desafio já foi respondido.",
+                    ephemeral=True,
+                )
+                return
+
+            debited, challenger_balance, opponent_balance = place_duel_bets(
+                self.challenger.id,
+                self.opponent.id,
+                self.bet,
+            )
+            if not debited:
+                self.finished = True
+                self.result = (
+                    "❌ Desafio cancelado: um ou ambos os jogadores não têm "
+                    f"{format_coins(self.bet)} moedas disponíveis."
+                )
+                self.challenger_balance = challenger_balance
+                self.opponent_balance = opponent_balance
+                self._disable_all_buttons()
+                self.stop()
+                await interaction.response.edit_message(
+                    embed=self.create_embed(),
+                    view=None,
+                )
+                return
+
+            self.accepted = True
+            self.challenger_balance = challenger_balance
+            self.opponent_balance = opponent_balance
+            _button.disabled = True
+            self.decline.disabled = True
+            if self.game == "dados":
+                challenger_roll = random.randint(1, 6)
+                opponent_roll = random.randint(1, 6)
+                if challenger_roll == opponent_roll:
+                    await self._finish_round(
+                        None,
+                        f"🤝 Ambos tiraram **{challenger_roll}**. "
+                        "As duas apostas foram devolvidas.",
+                    )
+                else:
+                    winner = (
+                        self.challenger
+                        if challenger_roll > opponent_roll
+                        else self.opponent
+                    )
+                    house_fee = (
+                        self.bet * 2 * PVP_HOUSE_TAX_PERCENT // 100
+                    )
+                    await self._finish_round(
+                        winner.id,
+                        f"🎉 {winner.mention} venceu! "
+                        f"Resultados: {self.challenger.mention} tirou "
+                        f"**{challenger_roll}** e {self.opponent.mention} "
+                        f"tirou **{opponent_roll}**. Do pote de "
+                        f"**{format_coins(self.bet * 2)} moedas**, "
+                        f"**{format_coins(house_fee)}** vão para a casa principal "
+                        f"e o vencedor recebe **"
+                        f"{format_coins(self.bet * 2 - house_fee)} moedas**.",
+                    )
+            else:
+                self.pedra.disabled = False
+                self.papel.disabled = False
+                self.tesoura.disabled = False
+                self.result = (
+                    "Desafio aceito! Os dois jogadores devem escolher "
+                    "pedra, papel ou tesoura. As escolhas ficam ocultas "
+                    "até ambos confirmarem."
+                )
+            await interaction.response.edit_message(
+                embed=self.create_embed(),
+                view=None if self.finished else self,
+            )
+
+    @discord.ui.button(
+        label="Recusar",
+        emoji="✖️",
+        style=discord.ButtonStyle.danger,
+    )
+    async def decline(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if _button.disabled:
+            await interaction.response.send_message(
+                "Este desafio já foi respondido.",
+                ephemeral=True,
+            )
+            return
+        if not await ensure_betting_channel(interaction):
+            return
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message(
+                "Somente a pessoa desafiada pode recusar.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.turn_lock:
+            if self.accepted or self.finished:
+                await interaction.response.send_message(
+                    "Este desafio já foi respondido.",
+                    ephemeral=True,
+                )
+                return
+            self.finished = True
+            self.result = f"❌ {self.opponent.mention} recusou o desafio."
+            self._disable_all_buttons()
+            self.stop()
+            await interaction.response.edit_message(
+                embed=self.create_embed(),
+                view=None,
+            )
+
+    async def _choose(
+        self,
+        interaction: discord.Interaction,
+        choice: str,
+    ) -> None:
+        if not await ensure_betting_channel(interaction):
+            return
+        async with self.turn_lock:
+            if not self.accepted or self.finished:
+                await interaction.response.send_message(
+                    "Este desafio não está aceitando escolhas.",
+                    ephemeral=True,
+                )
+                return
+            if interaction.user.id in self.choices:
+                await interaction.response.send_message(
+                    "Você já confirmou sua escolha.",
+                    ephemeral=True,
+                )
+                return
+
+            self.choices[interaction.user.id] = choice
+            if len(self.choices) == 2:
+                challenger_choice = self.choices[self.challenger.id]
+                opponent_choice = self.choices[self.opponent.id]
+                if challenger_choice == opponent_choice:
+                    await self._finish_round(
+                        None,
+                        f"🤝 Empate! Ambos escolheram **{challenger_choice}**. "
+                        "As duas apostas foram devolvidas.",
+                    )
+                else:
+                    beats = {
+                        "pedra": "tesoura",
+                        "papel": "pedra",
+                        "tesoura": "papel",
+                    }
+                    winner = (
+                        self.challenger
+                        if beats[challenger_choice] == opponent_choice
+                        else self.opponent
+                    )
+                    house_fee = (
+                        self.bet * 2 * PVP_HOUSE_TAX_PERCENT // 100
+                    )
+                    await self._finish_round(
+                        winner.id,
+                        f"🎉 {winner.mention} venceu! "
+                        f"{self.challenger.mention} escolheu **{challenger_choice}** "
+                        f"e {self.opponent.mention} escolheu **{opponent_choice}**. "
+                        f"Do pote de **{format_coins(self.bet * 2)} moedas**, "
+                        f"**{format_coins(house_fee)}** vão para a casa principal "
+                        f"e o vencedor recebe **"
+                        f"{format_coins(self.bet * 2 - house_fee)} moedas**.",
+                    )
+            else:
+                self.result = (
+                    f"{interaction.user.mention} já escolheu em segredo. "
+                    "Aguardando o outro jogador."
+                )
+
+            await interaction.response.edit_message(
+                embed=self.create_embed(),
+                view=None if self.finished else self,
+            )
+
+    @discord.ui.button(
+        label="Pedra",
+        emoji="🪨",
+        style=discord.ButtonStyle.secondary,
+        disabled=True,
+    )
+    async def pedra(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if _button.disabled:
+            await interaction.response.send_message(
+                "As escolhas ainda não estão disponíveis.",
+                ephemeral=True,
+            )
+            return
+        await self._choose(interaction, "pedra")
+
+    @discord.ui.button(
+        label="Papel",
+        emoji="📄",
+        style=discord.ButtonStyle.secondary,
+        disabled=True,
+    )
+    async def papel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if _button.disabled:
+            await interaction.response.send_message(
+                "As escolhas ainda não estão disponíveis.",
+                ephemeral=True,
+            )
+            return
+        await self._choose(interaction, "papel")
+
+    @discord.ui.button(
+        label="Tesoura",
+        emoji="✂️",
+        style=discord.ButtonStyle.secondary,
+        disabled=True,
+    )
+    async def tesoura(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if _button.disabled:
+            await interaction.response.send_message(
+                "As escolhas ainda não estão disponíveis.",
+                ephemeral=True,
+            )
+            return
+        await self._choose(interaction, "tesoura")
+
+    async def on_timeout(self) -> None:
+        async with self.turn_lock:
+            if self.finished:
+                return
+            if self.accepted:
+                await self._finish_round(
+                    None,
+                    "⏰ Tempo esgotado. As duas apostas foram devolvidas.",
+                )
+            else:
+                self.finished = True
+                self.result = "⏰ O desafio expirou sem ser aceito."
+                self._disable_all_buttons()
+                self.stop()
+            if self.message is not None:
+                await self.message.edit(embed=self.create_embed(), view=None)
+
+
+async def is_bot_owner(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == BOT_OWNER_ID
+
+
+def violates_moderation_hierarchy(
+    interaction: discord.Interaction,
+    target: discord.Member,
+) -> bool:
+    guild = interaction.guild
+    actor = interaction.user
+    bot_member = guild.me if guild else None
+    if guild is None or bot_member is None or not isinstance(actor, discord.Member):
+        return True
+
+    if target == guild.owner or target.top_role >= bot_member.top_role:
+        return True
+
+    return actor != guild.owner and target.top_role >= actor.top_role
+
+
+@bot.tree.command(name="ping", description="Verifica se o bot está respondendo.")
+async def ping(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("Pong!")
+
+
+@bot.tree.command(name="oi", description="Saúda você.")
+async def oi(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(f"Oi, {interaction.user.mention}!")
+
+
+@bot.tree.command(name="teste", description="Executa um teste de funcionamento.")
+async def teste(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        f"Teste realizado com sucesso, {interaction.user.mention}!"
+    )
+
+@bot.tree.command(name="kiss", description="Beija um usuário.")
+async def kiss(interaction: discord.Interaction, user: discord.User) -> None:
+    await interaction.response.send_message(f"{interaction.user.mention} deu um beijo em {user.mention}!")
+    kissback = await interaction.followup.send(f"{user.mention}, você quer retribuir o beijo? (responda com 'sim' ou 'não')", wait=True)
+    kissback_response = await bot.wait_for('message', check=lambda m: m.author == user and m.channel == interaction.channel)
+    if kissback_response.content.lower() in ['sim', 's']:
+        await interaction.followup.send(f"{user.mention} retribuiu o beijo!")
+    else:
+        await interaction.followup.send(f"{user.mention} não quis retribuir o beijo.")
+        
+@bot.tree.command(name="hug", description="Abraça um usuário.")
+async def hug(interaction: discord.Interaction, user: discord.User) -> None:
+    await interaction.response.send_message(f"{interaction.user.mention} deu um abraço em {user.mention}!")
+    hugback = await interaction.followup.send(f"{user.mention}, você quer retribuir o abraço? (responda com 'sim' ou 'não')", wait=True)
+    hugback_response = await bot.wait_for('message', check=lambda m: m.author == user and m.channel == interaction.channel)
+    if hugback_response.content.lower() in ['sim', 's']:
+        await interaction.followup.send(f"{user.mention} retribuiu o abraço!")
+    else:
+        await interaction.followup.send(f"{user.mention} não quis retribuir o abraço.")
+        
+        
+@bot.tree.command(name="slap", description="Dá um tapa em um usuário.")
+async def slap(interaction: discord.Interaction, user: discord.User) -> None:
+    await interaction.response.send_message(f"{interaction.user.mention} deu um tapa em {user.mention}!")
+    slapback = await interaction.followup.send(f"{user.mention}, você quer retribuir o tapa? (responda com 'sim' ou 'não')", wait=True)
+    slapback_response = await bot.wait_for('message', check=lambda m: m.author == user and m.channel == interaction.channel)
+    if slapback_response.content.lower() in ['sim', 's']:
+        await interaction.followup.send(f"{user.mention} retribuiu o tapa!")
+    else:
+        await interaction.followup.send(f"{user.mention} não quis retribuir o tapa.")
+        
+        
+@bot.tree.command(name="daily", description="Recebe sua recompensa diária de moedas.")
+async def daily(interaction: discord.Interaction) -> None:
+    success, balance, amount = claim_reward(interaction.user.id, "daily")
+    if not success:
+        await interaction.response.send_message(
+            f"Você já resgatou sua recompensa diária. "
+            f"Tente novamente em {format_remaining(amount)}.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{interaction.user.mention} recebeu {amount} moedas de recompensa diária. "
+        f"Saldo: {balance} moedas!"
+    )
+
+
+@bot.tree.command(name="weekly", description="Recebe sua recompensa semanal de moedas.")
+async def weekly(interaction: discord.Interaction) -> None:
+    success, balance, amount = claim_reward(interaction.user.id, "weekly")
+    if not success:
+        await interaction.response.send_message(
+            f"Você já resgatou sua recompensa semanal. "
+            f"Tente novamente em {format_remaining(amount)}.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{interaction.user.mention} recebeu {amount} moedas de recompensa semanal. "
+        f"Saldo: {balance} moedas!"
+    )
+
+
+@bot.tree.command(name="monthly", description="Recebe sua recompensa mensal de moedas.")
+async def monthly(interaction: discord.Interaction) -> None:
+    success, balance, amount = claim_reward(interaction.user.id, "monthly")
+    if not success:
+        await interaction.response.send_message(
+            f"Você já resgatou sua recompensa mensal. "
+            f"Tente novamente em {format_remaining(amount)}.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{interaction.user.mention} recebeu {amount} moedas de recompensa mensal. "
+        f"Saldo: {balance} moedas!"
+    )
+
+
+@bot.tree.command(name="saldo", description="Mostra seu saldo de moedas.")
+async def saldo(interaction: discord.Interaction) -> None:
+    balance = get_balance(interaction.user.id)
+    await interaction.response.send_message(
+        f"{interaction.user.mention}, seu saldo é de {balance} moedas.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="leaderboard", description="Mostra o ranking de moedas deste servidor.")
+@app_commands.guild_only()
+async def leaderboard(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    ranking = get_leaderboard([member.id for member in guild.members])
+    if not ranking:
+        await interaction.response.send_message(
+            "Ainda não há dados de moedas para os membros deste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    lines = [
+        f"**{position}.** <@{user_id}> — **{balance}** moedas"
+        f" | Ganho: {earned} | Perdido: {lost}"
+        for position, (user_id, balance, earned, lost) in enumerate(ranking, start=1)
+    ]
+    embed = discord.Embed(
+        title=f"Leaderboard de moedas — {guild.name}",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="canal_apostas",
+    description="Define o canal dos jogos de aposta; sem canal, remove a restrição.",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(canal="Canal autorizado; deixe vazio para liberar todos os canais.")
+async def canal_apostas(
+    interaction: discord.Interaction,
+    canal: discord.TextChannel | None = None,
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    set_betting_channel(guild.id, canal.id if canal is not None else None)
+    if canal is None:
+        message = "Restrição removida: jogos de aposta liberados em todos os canais."
+    else:
+        message = f"Jogos de aposta limitados ao canal {canal.mention}."
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(
+    name="configurar_autorole_cassino",
+    description="Define o cargo dado a quem participar dos jogos do cassino.",
+)
+@app_commands.guild_only()
+@app_commands.check(is_bot_owner)
+@app_commands.describe(
+    cargo="Cargo automático; deixe vazio para desativar neste servidor."
+)
+async def configurar_autorole_cassino(
+    interaction: discord.Interaction,
+    cargo: discord.Role | None = None,
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if cargo is None:
+        set_casino_autorole(guild.id, None)
+        await interaction.response.send_message(
+            "Autorole de participante do cassino desativado neste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    bot_member = guild.me
+    if bot_member is None or not bot_member.guild_permissions.manage_roles:
+        await interaction.response.send_message(
+            "O bot precisa da permissão **Gerenciar cargos** para atribuir "
+            "o autorole.",
+            ephemeral=True,
+        )
+        return
+    if cargo.is_default() or cargo.managed:
+        await interaction.response.send_message(
+            "Escolha um cargo normal, que possa ser atribuído pelo bot.",
+            ephemeral=True,
+        )
+        return
+    if cargo >= bot_member.top_role:
+        await interaction.response.send_message(
+            "O cargo do autorole precisa ficar abaixo do cargo mais alto do bot.",
+            ephemeral=True,
+        )
+        return
+
+    set_casino_autorole(guild.id, cargo.id)
+    await interaction.response.send_message(
+        f"Autorole configurado: {cargo.mention}. Membros recebem esse cargo "
+        "ao usar um comando de aposta ou jogo do cassino neste servidor.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="configurar_cassinos",
+    description="Define a taxa de criação e a taxa da casa principal.",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.describe(
+    taxa_criacao="Moedas globais cobradas de quem criar um cassino.",
+    taxa_casa="Percentual cobrado sobre lucro de cassinos de servidor (0 a 50).",
+)
+async def configurar_cassinos(
+    interaction: discord.Interaction,
+    taxa_criacao: app_commands.Range[int, 0, 1_000_000],
+    taxa_casa: app_commands.Range[int, 0, 50],
+) -> None:
+    update_casino_settings(
+        creation_fee=taxa_criacao,
+        tax_percent=taxa_casa,
+    )
+    await interaction.response.send_message(
+        f"Configuração atualizada: criação por **{format_coins(taxa_criacao)} "
+        f"moedas** e taxa da casa principal de **{taxa_casa}%**. "
+        "Upgrades reduzem a taxa em 1 ponto percentual por nível, "
+        "até o mínimo de 1% (ou 0% se a taxa base for 0).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="configurar_npcs_principais",
+    description="Define quantos NPCs apostam na casa principal.",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.describe(
+    quantidade="Quantidade de NPCs da casa principal (de 1 a 100)."
+)
+async def configurar_npcs_principais(
+    interaction: discord.Interaction,
+    quantidade: app_commands.Range[int, 1, CASINO_MAX_NPCS],
+) -> None:
+    set_main_house_npc_count(quantidade)
+    await interaction.response.send_message(
+        f"A casa principal agora tem **{quantidade} NPCs**. Os intervalos "
+        "das apostas variam conforme a presença do dono.",
+        ephemeral=True,
+    )
+
+
+class MainHouseUpgradeView(discord.ui.View):
+    def __init__(
+        self,
+        user_id: int,
+        upgrade_type: str,
+        expected_level: int,
+        expected_npc_count: int | None,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.upgrade_type = upgrade_type
+        self.expected_level = expected_level
+        self.expected_npc_count = expected_npc_count
+
+    @discord.ui.button(
+        label="Confirmar upgrade",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Somente quem iniciou o upgrade pode confirmá-lo.",
+                ephemeral=True,
+            )
+            return
+
+        status, balance, level, npc_count, cost = upgrade_main_house(
+            interaction.user.id,
+            self.upgrade_type,
+            self.expected_level,
+            self.expected_npc_count,
+        )
+        if status == "changed":
+            message = (
+                "O estado da casa mudou desde a prévia. Nenhum valor foi "
+                "debitado; execute o comando novamente para conferir o novo "
+                "custo e confirmar."
+            )
+        elif status == "insufficient":
+            message = (
+                f"Saldo insuficiente: o upgrade custa "
+                f"**{format_coins(cost)} moedas** e o saldo atual é "
+                f"**{format_coins(balance)} moedas**."
+            )
+        elif status == "max_count":
+            message = f"A casa principal já atingiu o limite de {CASINO_MAX_NPCS} NPCs."
+        elif status == "max_level":
+            message = (
+                f"Este tipo de upgrade já atingiu o nível máximo "
+                f"({MAIN_HOUSE_UPGRADE_MAX_LEVEL})."
+            )
+        else:
+            message = (
+                f"✅ Upgrade concluído! Saldo restante: "
+                f"**{format_coins(balance)} moedas**."
+            )
+            if self.upgrade_type == "npc_count":
+                message += f" A casa agora tem **{npc_count} NPCs**."
+            else:
+                npc_bet_min, npc_bet_max = main_house_npc_bet_range(level)
+                message += (
+                    f" Nível de apostas por NPC: **{level}/"
+                    f"{MAIN_HOUSE_UPGRADE_MAX_LEVEL}**; cada NPC aposta "
+                    f"entre **{format_coins(npc_bet_min)} e "
+                    f"{format_coins(npc_bet_max)} moedas**."
+                )
+
+        _button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content=message,
+            embed=None,
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="✖️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Somente quem iniciou o upgrade pode cancelá-lo.",
+                ephemeral=True,
+            )
+            return
+        _button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Upgrade cancelado; nenhum valor foi debitado.",
+            embed=None,
+            view=None,
+        )
+
+
+@bot.tree.command(
+    name="upgrade_casa_principal",
+    description="Escolhe um upgrade para a casa principal e confirma a compra.",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.choices(
+    tipo=[
+        app_commands.Choice(name="Aumentar quantidade de NPCs", value="npc_count"),
+        app_commands.Choice(name="Aumentar apostas por NPC", value="npc_bet"),
+    ]
+)
+async def upgrade_casa_principal(
+    interaction: discord.Interaction,
+    tipo: app_commands.Choice[str],
+) -> None:
+    status = get_main_house_status()
+    if tipo.value == "npc_count":
+        level = status["npc_count_upgrade_level"]
+        current_value = status["npc_count"]
+        next_value = min(
+            CASINO_MAX_NPCS,
+            current_value + MAIN_HOUSE_UPGRADE_NPC_BONUS,
+        )
+        cost = status["next_npc_count_upgrade_cost"]
+        title = "Upgrade de quantidade de NPCs"
+        effect = (
+            f"A quantidade de NPCs passará de **{current_value}** para "
+            f"**{next_value}**."
+        )
+        if current_value >= CASINO_MAX_NPCS:
+            await interaction.response.send_message(
+                f"A casa principal já atingiu o limite de "
+                f"{CASINO_MAX_NPCS} NPCs.",
+                ephemeral=True,
+            )
+            return
+    else:
+        level = status["npc_bet_upgrade_level"]
+        current_min = status["npc_bet_min"]
+        current_max = status["npc_bet_max"]
+        next_min, next_max = main_house_npc_bet_range(level + 1)
+        cost = status["next_npc_bet_upgrade_cost"]
+        title = "Upgrade de apostas por NPC"
+        effect = (
+            f"A faixa de aposta de cada NPC passará de "
+            f"**{format_coins(current_min)}–{format_coins(current_max)}** "
+            f"para **{format_coins(next_min)}–{format_coins(next_max)} moedas**."
+        )
+
+    if cost == 0:
+        await interaction.response.send_message(
+            f"Este tipo de upgrade já atingiu o nível máximo "
+            f"({MAIN_HOUSE_UPGRADE_MAX_LEVEL}).",
+            ephemeral=True,
+        )
+        return
+    if status["balance"] < cost:
+        await interaction.response.send_message(
+            f"O upgrade custa **{format_coins(cost)} moedas**, mas o saldo "
+            f"da casa principal é **{format_coins(status['balance'])} moedas**.",
+            ephemeral=True,
+        )
+        return
+
+    next_level = level + 1
+    embed = discord.Embed(
+        title=f"Confirmar {title.lower()}",
+        description=(
+            f"{effect}\n\n"
+            f"Nível: **{level} → {next_level}**\n"
+            f"Custo: **{format_coins(cost)} moedas**\n"
+            f"Saldo após a compra: "
+            f"**{format_coins(status['balance'] - cost)} moedas**"
+        ),
+        color=discord.Color.gold(),
+    )
+    view = MainHouseUpgradeView(
+        interaction.user.id,
+        tipo.value,
+        level,
+        current_value if tipo.value == "npc_count" else None,
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=view,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="status_casa_principal",
+    description="Mostra saldo e estatísticas privadas da casa principal.",
+)
+@app_commands.check(is_bot_owner)
+async def status_casa_principal(interaction: discord.Interaction) -> None:
+    status = get_main_house_status()
+    embed = discord.Embed(
+        title="Status da casa principal",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Saldo atual",
+        value=f"**{format_coins(status['balance'])} moedas**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Ganhos acumulados",
+        value=f"{format_coins(status['total_earned'])} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Perdas acumuladas",
+        value=f"{format_coins(status['total_lost'])} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Jogos liquidados",
+        value=format_coins(status["games"]),
+        inline=True,
+    )
+    embed.add_field(
+        name="Apostas de NPCs",
+        value=(
+            f"{format_coins(status['npc_games'])} apostas históricas | "
+            f"{status['npc_count']} NPCs ativos | "
+            f"apostas de {format_coins(status['npc_bet_min'])} a "
+            f"{format_coins(status['npc_bet_max'])}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Upgrades da casa",
+        value=(
+            f"NPCs: nível **{status['npc_count_upgrade_level']}/"
+            f"{MAIN_HOUSE_UPGRADE_MAX_LEVEL}**, "
+            f"investido **{format_coins(status['npc_count_upgrade_costs_paid'])}**"
+            + (
+                f", próximo **{format_coins(status['next_npc_count_upgrade_cost'])}**"
+                if status["next_npc_count_upgrade_cost"]
+                else ", limite de NPCs/nível atingido"
+            )
+            + f"\nApostas por NPC: nível **{status['npc_bet_upgrade_level']}/"
+            f"{MAIN_HOUSE_UPGRADE_MAX_LEVEL}**, "
+            f"investido **{format_coins(status['npc_bet_upgrade_costs_paid'])}**"
+            + (
+                f", próximo **{format_coins(status['next_npc_bet_upgrade_cost'])}**"
+                if status["next_npc_bet_upgrade_cost"]
+                else ", nível máximo atingido"
+            )
+            + f"\nTotal investido: "
+            f"**{format_coins(status['upgrade_costs_paid'])} moedas**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Exposição reservada",
+        value=f"{format_coins(status['reservations'])} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Cassinos de servidor",
+        value=(
+            f"{status['casino_count']} cassinos | "
+            f"{format_coins(status['local_treasury'])} moedas nos caixas locais"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="criar_cassino",
+    description="Cria o cassino e a moeda próprios deste servidor.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    nome="Nome do cassino (2 a 40 caracteres).",
+    moeda="Nome da moeda exclusiva deste servidor (2 a 16 caracteres).",
+)
+async def criar_cassino(
+    interaction: discord.Interaction,
+    nome: app_commands.Range[str, 2, 40],
+    moeda: app_commands.Range[str, 2, 16],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    status, balance, _ = create_guild_casino(
+        guild.id,
+        interaction.user.id,
+        get_house_owner_id(),
+        nome.strip(),
+        moeda.strip(),
+    )
+    if status == "exists":
+        await interaction.response.send_message(
+            "Este servidor já tem um cassino. O proprietário pode melhorá-lo "
+            "com `/upgrade_cassino`.",
+            ephemeral=True,
+        )
+        return
+    if status == "insufficient":
+        fee, _ = get_casino_settings()
+        await interaction.response.send_message(
+            f"Criar um cassino custa {format_coins(fee)} moedas globais. "
+            f"Seu saldo é {format_coins(balance)}.",
+            ephemeral=True,
+        )
+        return
+
+    fee, _ = get_casino_settings()
+    await interaction.response.send_message(
+        f"🎰 **{nome.strip()}** foi criado para **{guild.name}**! "
+        f"Moeda: **{moeda.strip()}**. Taxa paga à casa principal: "
+        f"**{format_coins(fee)} moedas**. O cassino começa com "
+        f"**{format_coins(CASINO_STARTING_TREASURY)} {moeda.strip()}** "
+        f"no caixa, {CASINO_STARTING_NPCS} NPCs apostando conforme a presença "
+        "do dono e com o "
+        "jogo cara ou coroa liberado.",
+    )
+
+
+@bot.tree.command(
+    name="contratar_npcs_cassino",
+    description="Aumenta a quantidade de NPCs que apostam no seu cassino.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    quantidade="NPCs para contratar (de 1 a 10), por 1.000 moedas cada."
+)
+async def contratar_npcs_cassino(
+    interaction: discord.Interaction,
+    quantidade: app_commands.Range[int, 1, 10],
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    status, treasury, npc_count = hire_guild_casino_npcs(
+        guild.id,
+        interaction.user.id,
+        quantidade,
+    )
+    if status == "missing":
+        message = "Este servidor ainda não tem um cassino. Use `/criar_cassino`."
+    elif status == "not_owner":
+        message = "Somente o proprietário do cassino pode contratar NPCs."
+    elif status == "max_npcs":
+        message = (
+            f"O cassino pode ter no máximo {CASINO_MAX_NPCS} NPCs. "
+            f"Atualmente tem {npc_count}."
+        )
+    elif status == "insufficient":
+        cost = quantidade * CASINO_NPC_HIRE_COST
+        message = (
+            f"Contratar {quantidade} NPCs custa {format_coins(cost)} moedas. "
+            f"O caixa do cassino tem {format_coins(treasury)}."
+        )
+    else:
+        cost = quantidade * CASINO_NPC_HIRE_COST
+        casino = get_guild_casino(guild.id)
+        currency_name = casino[2] if casino is not None else "moedas"
+        message = (
+            f"✅ NPCs contratados! Seu cassino agora tem **{npc_count} NPCs** "
+            f"apostando conforme a presença do dono. Custo: {format_coins(cost)} "
+            f"{currency_name}. Caixa restante: {format_coins(treasury)} "
+            f"{currency_name}."
+        )
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(
+    name="solicitar_jogo_cassino",
+    description="Envia ao dono do bot uma ideia de jogo para o seu cassino.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    nome_jogo="Nome do jogo que você gostaria de adicionar.",
+    pedido="Descreva como o jogo funcionaria (10 a 1500 caracteres).",
+)
+async def solicitar_jogo_cassino(
+    interaction: discord.Interaction,
+    nome_jogo: app_commands.Range[str, 2, 80],
+    pedido: app_commands.Range[str, 10, 1500],
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    casino = get_guild_casino(guild.id)
+    if casino is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino.",
+            ephemeral=True,
+        )
+        return
+    if casino[0] != interaction.user.id:
+        await interaction.response.send_message(
+            "Somente o proprietário do cassino pode enviar pedidos de jogos.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    house_owner_id = get_house_owner_id()
+    owner = bot.get_user(house_owner_id)
+    if owner is None:
+        try:
+            owner = await bot.fetch_user(house_owner_id)
+        except discord.HTTPException as error:
+            logger.error(
+                "Não foi possível localizar o dono do bot para encaminhar um pedido de jogo.",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            await interaction.followup.send(
+                "Não foi possível localizar o dono do bot para entregar seu pedido.",
+                ephemeral=True,
+            )
+            return
+
+    embed = discord.Embed(
+        title="Pedido de novo jogo para cassino",
+        description=pedido.strip(),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Jogo solicitado",
+        value=nome_jogo.strip(),
+        inline=True,
+    )
+    embed.add_field(
+        name="Cassino / servidor",
+        value=f"{casino[1]} — {guild.name} (`{guild.id}`)",
+        inline=False,
+    )
+    embed.add_field(
+        name="Proprietário do cassino",
+        value=(
+            f"**{interaction.user.display_name}** "
+            f"({interaction.user.mention}) (`{interaction.user.id}`)"
+        ),
+        inline=False,
+    )
+
+    try:
+        await owner.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "Não consegui entregar o pedido por mensagem direta. "
+            "Peça ao dono do bot para permitir DMs do bot e tente novamente.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as error:
+        logger.error(
+            "Falha ao enviar por DM um pedido de jogo do cassino %s no servidor %s.",
+            casino[1],
+            guild.id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await interaction.followup.send(
+            "Ocorreu um erro ao enviar seu pedido por DM. Tente novamente mais tarde.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        "Seu pedido de jogo foi enviado por DM ao dono do bot.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="daily_cassino",
+    description="Resgata a recompensa diária na moeda do cassino do servidor.",
+)
+@app_commands.guild_only()
+async def daily_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+    result, balance, amount = claim_guild_casino_reward(
+        guild.id,
+        interaction.user.id,
+        "daily",
+    )
+    if result == "missing":
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+    if result == "cooldown":
+        await interaction.response.send_message(
+            "Você já resgatou a recompensa diária do cassino. "
+            f"Tente novamente em {format_remaining(amount)}.",
+            ephemeral=True,
+        )
+        return
+    if result == "insufficient_treasury":
+        await interaction.response.send_message(
+            "O caixa do cassino está sem fundos para pagar a recompensa diária.",
+            ephemeral=True,
+        )
+        return
+
+    casino = get_guild_casino(guild.id)
+    currency_name = casino[2] if casino is not None else "moedas"
+    await interaction.response.send_message(
+        f"Você recebeu **{format_coins(amount)} {currency_name}**. "
+        f"Saldo do cassino: **{format_coins(balance)} {currency_name}**."
+    )
+
+
+@bot.tree.command(
+    name="weekly_cassino",
+    description="Resgata a recompensa semanal na moeda do cassino do servidor.",
+)
+@app_commands.guild_only()
+async def weekly_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+    result, balance, amount = claim_guild_casino_reward(
+        guild.id,
+        interaction.user.id,
+        "weekly",
+    )
+    if result == "missing":
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+    if result == "cooldown":
+        await interaction.response.send_message(
+            "Você já resgatou a recompensa semanal do cassino. "
+            f"Tente novamente em {format_remaining(amount)}.",
+            ephemeral=True,
+        )
+        return
+    if result == "insufficient_treasury":
+        await interaction.response.send_message(
+            "O caixa do cassino está sem fundos para pagar a recompensa semanal.",
+            ephemeral=True,
+        )
+        return
+
+    casino = get_guild_casino(guild.id)
+    currency_name = casino[2] if casino is not None else "moedas"
+    await interaction.response.send_message(
+        f"Você recebeu **{format_coins(amount)} {currency_name}**. "
+        f"Saldo do cassino: **{format_coins(balance)} {currency_name}**."
+    )
+
+
+@bot.tree.command(
+    name="saldo_cassino",
+    description="Mostra seu saldo na moeda do cassino deste servidor.",
+)
+@app_commands.guild_only()
+async def saldo_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    casino = get_guild_casino(guild.id) if guild is not None else None
+    if casino is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+    balance = get_guild_casino_balance(guild.id, interaction.user.id)
+    await interaction.response.send_message(
+        f"{interaction.user.mention}, seu saldo em **{casino[2]}** é "
+        f"**{format_coins(balance)} {casino[2]}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="status_cassino",
+    description="Mostra estatísticas privadas do seu cassino neste servidor.",
+)
+@app_commands.guild_only()
+async def status_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    status = get_guild_casino_status(guild.id) if guild is not None else None
+    if status is None or guild is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+
+    (
+        owner_id,
+        name,
+        currency_name,
+        treasury,
+        level,
+        npc_count,
+        games_played,
+        npc_games,
+        house_earned,
+        house_lost,
+        tax_paid,
+        upgrade_costs_paid,
+        npc_hiring_costs,
+        rewards_paid,
+    ) = status
+    if interaction.user.id != owner_id:
+        await interaction.response.send_message(
+            "Somente o proprietário do cassino pode ver estas estatísticas.",
+            ephemeral=True,
+        )
+        return
+
+    net_operating_profit = house_earned - house_lost - tax_paid
+    net_sign = "+" if net_operating_profit > 0 else ""
+    embed = discord.Embed(
+        title=f"Status do cassino — {name}",
+        description=f"Estatísticas privadas de **{guild.name}**.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Caixa e operação",
+        value=(
+            f"Caixa: **{format_coins(treasury)} {currency_name}**\n"
+            f"Nível: **{level}/{len(CASINO_UPGRADE_COSTS)}**\n"
+            f"NPCs ativos: **{npc_count}** (limite {CASINO_MAX_NPCS})"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Apostas e resultado da casa",
+        value=(
+            f"Jogos liquidados: **{format_coins(games_played)}**\n"
+            f"Apostas de NPCs: **{format_coins(npc_games)}**\n"
+            f"Ganhos brutos: **{format_coins(house_earned)} {currency_name}**\n"
+            f"Perdas: **{format_coins(house_lost)} {currency_name}**\n"
+            f"Taxas enviadas à casa principal: **{format_coins(tax_paid)} {currency_name}**\n"
+            f"Resultado operacional líquido: **{net_sign}"
+            f"{format_coins(net_operating_profit)} {currency_name}**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Investimentos e recompensas",
+        value=(
+            f"Upgrades pagos à casa principal: "
+            f"**{format_coins(upgrade_costs_paid)} {currency_name}**\n"
+            f"Contratação de NPCs: **{format_coins(npc_hiring_costs)} {currency_name}**\n"
+            f"Recompensas pagas aos jogadores: "
+            f"**{format_coins(rewards_paid)} {currency_name}**"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="leaderboard_cassino",
+    description="Mostra o ranking da moeda do cassino deste servidor.",
+)
+@app_commands.guild_only()
+async def leaderboard_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    ranking_data = (
+        get_guild_casino_leaderboard(guild.id)
+        if guild is not None
+        else None
+    )
+    if ranking_data is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+    name, currency_name, ranking = ranking_data
+    if not ranking:
+        await interaction.response.send_message(
+            "Ainda não há jogadores no ranking deste cassino.",
+            ephemeral=True,
+        )
+        return
+    lines = [
+        f"**{position}.** <@{user_id}> — **{format_coins(balance)} "
+        f"{currency_name}** | Ganho: {format_coins(earned)}"
+        f" | Perdido: {format_coins(lost)}"
+        for position, (user_id, balance, earned, lost) in enumerate(
+            ranking,
+            start=1,
+        )
+    ]
+    embed = discord.Embed(
+        title=f"Leaderboard — {name}",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="upgrade_cassino",
+    description="Melhora o cassino, reduz a taxa e libera um novo jogo.",
+)
+@app_commands.guild_only()
+async def upgrade_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+    status, treasury, level, cost = upgrade_guild_casino(
+        guild.id,
+        interaction.user.id,
+    )
+    if status == "missing":
+        message = "Este servidor ainda não tem um cassino. Use `/criar_cassino`."
+    elif status == "not_owner":
+        message = "Somente o proprietário do cassino pode comprar upgrades."
+    elif status == "max_level":
+        message = "O cassino já está no nível máximo."
+    elif status == "insufficient":
+        message = (
+            f"O upgrade custa {format_coins(cost)} moedas locais. "
+            f"O caixa tem {format_coins(treasury)}."
+        )
+    else:
+        unlocked_game = next(
+            game
+            for game, required_level in CASINO_GAME_UNLOCKS.items()
+            if required_level == level
+        )
+        casino = get_guild_casino(guild.id)
+        currency_name = casino[2] if casino is not None else "moedas"
+        message = (
+            f"⬆️ Cassino promovido ao nível **{level}**! "
+            f"Jogo liberado: **{unlocked_game}**. "
+            f"A taxa da casa principal cai em {CASINO_TAX_REDUCTION_PER_LEVEL} "
+            f"ponto percentual por nível, até o mínimo de "
+            f"{CASINO_MINIMUM_TAX_PERCENT}%. Os {format_coins(cost)} "
+            f"{currency_name} do upgrade foram pagos à casa principal. "
+            f"Caixa restante: "
+            f"{format_coins(treasury)} {currency_name}."
+        )
+    await interaction.response.send_message(message)
+
+
+@bot.tree.command(
+    name="jogar_cassino",
+    description="Joga por moedas no cassino próprio deste servidor.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    aposta="Quantidade de moedas locais para apostar.",
+    jogo="Escolha um jogo já liberado pelo cassino.",
+    escolha="Cara/coroa, par/ímpar, número 1-6 ou vermelho/preto/verde.",
+)
+@app_commands.choices(
+    jogo=[
+        app_commands.Choice(name="Cara ou coroa", value="moeda"),
+        app_commands.Choice(name="Dados", value="dados"),
+        app_commands.Choice(name="Roleta", value="roleta"),
+        app_commands.Choice(name="Caça-níquel", value="cacaniquel"),
+    ]
+)
+async def jogar_cassino(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    jogo: app_commands.Choice[str],
+    escolha: str | None = None,
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    guild = interaction.guild
+    casino = get_guild_casino(guild.id) if guild is not None else None
+    if casino is None or guild is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
+            ephemeral=True,
+        )
+        return
+    _, name, currency_name, _, upgrade_level = casino
+    required_level = CASINO_GAME_UNLOCKS[jogo.value]
+    if upgrade_level < required_level:
+        await interaction.response.send_message(
+            f"**{jogo.name}** ainda está bloqueado. O cassino precisa "
+            f"chegar ao nível **{required_level}**.",
+            ephemeral=True,
+        )
+        return
+
+    drawn = ""
+    if jogo.value == "moeda":
+        normalized_choice = (escolha or "").strip().lower()
+        if normalized_choice not in ("cara", "coroa"):
+            await interaction.response.send_message(
+                "Para cara ou coroa, escolha `cara` ou `coroa`.",
+                ephemeral=True,
+            )
+            return
+        drawn = random.choice(("cara", "coroa"))
+        payout = aposta * 19 // 10 if normalized_choice == drawn else 0
+        choice_text = f"Escolha: **{normalized_choice}**."
+        result = f"A moeda caiu em **{drawn}**."
+    elif jogo.value == "dados":
+        normalized_choice = (escolha or "").strip().lower()
+        if normalized_choice == "impar":
+            normalized_choice = "ímpar"
+        if normalized_choice not in ("par", "ímpar", "1", "2", "3", "4", "5", "6"):
+            await interaction.response.send_message(
+                "Para dados, escolha `par`, `ímpar` ou um número de `1` a `6`.",
+                ephemeral=True,
+            )
+            return
+        roll = random.randint(1, 6)
+        if normalized_choice in ("par", "ímpar"):
+            drawn = "par" if roll % 2 == 0 else "ímpar"
+            won = drawn == normalized_choice
+            multiplier = 19 / 10
+        else:
+            drawn = str(roll)
+            won = roll == int(normalized_choice)
+            multiplier = 57 / 10
+        payout = aposta * int(multiplier * 10) // 10 if won else 0
+        choice_text = f"Escolha: **{normalized_choice}**."
+        result = f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'})."
+    elif jogo.value == "roleta":
+        normalized_choice = (escolha or "").strip().lower()
+        if normalized_choice not in ("vermelho", "preto", "verde"):
+            await interaction.response.send_message(
+                "Para a roleta, escolha `vermelho`, `preto` ou `verde`.",
+                ephemeral=True,
+            )
+            return
+        number = random.randint(0, 36)
+        drawn = (
+            "verde"
+            if number == 0
+            else "vermelho"
+            if number in ROULETTE_RED_NUMBERS
+            else "preto"
+        )
+        multiplier = 342 if normalized_choice == "verde" else 19
+        payout = aposta * multiplier // 10 if normalized_choice == drawn else 0
+        choice_text = f"Escolha: **{normalized_choice}**."
+        result = f"A roleta parou no **{number} {drawn}**."
+    else:
+        reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+        payout, combination, multiplier = slot_payout(reels, aposta)
+        drawn = " | ".join(reels)
+        choice_text = f"Combinação: **{drawn}**."
+        result = (
+            f"{combination}! Multiplicador x{multiplier}. "
+            f"Combinação: **{drawn}**."
+        )
+
+    settlement = settle_guild_casino_bet(
+        guild.id,
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    status, balance, treasury, tax_percent, tax = settlement
+    if status == "insufficient_player":
+        await interaction.response.send_message(
+            f"Saldo insuficiente em **{currency_name}**. "
+            f"Você tem {format_coins(balance)}.",
+            ephemeral=True,
+        )
+        return
+    if status == "insufficient_treasury":
+        await interaction.response.send_message(
+            f"O caixa do cassino não consegue cobrir esse prêmio; "
+            "a aposta foi cancelada e seu saldo não mudou.",
+            ephemeral=True,
+        )
+        return
+    if status != "settled":
+        await interaction.response.send_message(
+            "Não foi possível concluir a aposta porque o cassino não está disponível.",
+            ephemeral=True,
+        )
+        return
+
+    net_change = payout - aposta
+    net_sign = "+" if net_change > 0 else ""
+    embed = discord.Embed(
+        title=(
+            f"{'🎉 VOCÊ GANHOU!' if net_change > 0 else '❌ VOCÊ PERDEU' if net_change < 0 else '🤝 SEM LUCRO OU PREJUÍZO'} — {name}"
+        ),
+        description=f"{result}\n{choice_text}",
+        color=(
+            discord.Color.green()
+            if net_change > 0
+            else discord.Color.red()
+            if net_change < 0
+            else discord.Color.gold()
+        ),
+    )
+    embed.add_field(
+        name="Aposta",
+        value=f"{format_coins(aposta)} {currency_name}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Retorno total",
+        value=f"{format_coins(payout)} {currency_name}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Lucro / prejuízo",
+        value=f"{net_sign}{format_coins(net_change)} {currency_name}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Taxa paga à casa principal",
+        value=f"{format_coins(tax)} {currency_name} ({tax_percent}%)",
+        inline=True,
+    )
+    embed.set_footer(
+        text=(
+            f"Seu saldo: {format_coins(balance)} {currency_name} | "
+            f"Caixa do cassino: {format_coins(treasury)} {currency_name}"
+        )
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="cacaniquel", description="Gire a máquina caça-níquel usando suas moedas.")
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas para apostar (de 1 a 1.000.000).")
+async def cacaniquel(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    await interaction.response.defer()
+    reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+    payout, combination, multiplier = slot_payout(reels, aposta)
+    animation = await asyncio.to_thread(render_slot_gif, reels, payout, multiplier)
+
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.followup.send(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir este resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    if payout:
+        outcome = f"**{combination}! Multiplicador x{multiplier}.**"
+        result_title = "🎉 VOCÊ GANHOU!"
+        net_change = payout - aposta
+        color = discord.Color.green()
+    else:
+        outcome = f"**{combination}.**"
+        result_title = "😿 SEM PRÊMIO"
+        net_change = -aposta
+        color = discord.Color.red()
+
+    embed = discord.Embed(
+        title=f"🎰 CAÇA-NÍQUEL — {result_title}",
+        description=outcome,
+        color=color,
+    )
+    embed.add_field(
+        name="🎲 Resultado",
+        value=f"` {'  |  '.join(reels)} `",
+        inline=False,
+    )
+    embed.set_image(url="attachment://cacaniquel.gif")
+    embed.add_field(
+        name="🪙 Aposta",
+        value=f"{format_coins(aposta)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="💰 Retorno total (inclui aposta)",
+        value=f"{format_coins(payout)} moedas",
+        inline=True,
+    )
+    net_sign = "+" if net_change > 0 else ""
+    embed.add_field(
+        name="📊 Lucro / prejuízo",
+        value=f"{net_sign}{format_coins(net_change)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Combinações premiadas",
+        value=(
+            "Pares: 🍒 x1 • 🍋 x1 • 🔔 x2 • 💎 x3 • ⭐ x4 • 7️⃣ x6\n"
+            "Trincas: 🍒 x2 • 🍋 x3 • 🔔 x5 • 💎 x8 • ⭐ x12 • 7️⃣ x25\n"
+            "O multiplicador indica o total de moedas recebido."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
+    await interaction.followup.send(
+        embed=embed,
+        file=discord.File(animation, filename="cacaniquel.gif"),
+    )
+
+
+@bot.tree.command(name="corrida", description="Aposte em até três animais e tente acertar o sorteado.")
+@app_commands.guild_only()
+@app_commands.describe(
+    aposta="Moedas para apostar.",
+    animal="Primeiro animal escolhido.",
+    animal_2="Segundo animal opcional; reduz o multiplicador.",
+    animal_3="Terceiro animal opcional; reduz ainda mais o multiplicador.",
+)
+@app_commands.choices(
+    animal=[app_commands.Choice(name=animal, value=animal) for animal in BETTING_ANIMALS],
+    animal_2=[app_commands.Choice(name=animal, value=animal) for animal in BETTING_ANIMALS],
+    animal_3=[app_commands.Choice(name=animal, value=animal) for animal in BETTING_ANIMALS],
+)
+async def corrida(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    animal: str,
+    animal_2: str | None = None,
+    animal_3: str | None = None,
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    selected_animals = [animal]
+    if animal_2 is not None:
+        selected_animals.append(animal_2)
+    if animal_3 is not None:
+        selected_animals.append(animal_3)
+
+    if len(set(selected_animals)) != len(selected_animals):
+        await interaction.response.send_message(
+            "Escolha animais diferentes em cada opção.",
+            ephemeral=True,
+        )
+        return
+
+    if any(selected not in BETTING_ANIMALS for selected in selected_animals):
+        await interaction.response.send_message(
+            "Um ou mais animais escolhidos são inválidos.",
+            ephemeral=True,
+        )
+        return
+
+    drawn_animal = random.choice(BETTING_ANIMALS)
+    payout, multiplier = animal_bet_payout(
+        selected_animals,
+        drawn_animal,
+        aposta,
+    )
+    bet_status, balance, remaining = settle_animal_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if bet_status == "cooldown":
+        await interaction.response.send_message(
+            "Você já apostou no sorteio de animais hoje. "
+            f"Tente novamente em {format_remaining(remaining)}.",
+            ephemeral=True,
+        )
+        return
+    if bet_status != "accepted":
+        error = (
+            f"Saldo insuficiente. Você tem {format_coins(balance)} moedas."
+            if bet_status == "insufficient"
+            else "A aposta foi cancelada porque a banca principal não consegue "
+            "cobrir esse prêmio."
+        )
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    if payout:
+        result = f"🎉 O animal sorteado foi **{drawn_animal}**!"
+        color = discord.Color.green()
+        result_title = "VOCÊ GANHOU!"
+        net_change = payout - aposta
+    else:
+        result = f"🐾 O animal sorteado foi **{drawn_animal}**."
+        color = discord.Color.red()
+        result_title = "NÃO FOI DESSA VEZ"
+        net_change = -aposta
+
+    embed = discord.Embed(
+        title=f"🐾 SORTEIO DOS ANIMAIS — {result_title}",
+        description=result,
+        color=color,
+    )
+    embed.add_field(
+        name="Suas escolhas",
+        value="  |  ".join(selected_animals),
+        inline=False,
+    )
+    embed.add_field(
+        name="Resultado da aposta",
+        value=(
+            "✅ O animal sorteado está entre suas escolhas."
+            if payout
+            else "❌ O animal sorteado não está entre suas escolhas."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🪙 Aposta",
+        value=f"{format_coins(aposta)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="✖️ Multiplicador",
+        value=f"{multiplier:g}x",
+        inline=True,
+    )
+    embed.add_field(
+        name="💰 Retorno total (inclui aposta)",
+        value=f"{format_coins(payout)} moedas",
+        inline=True,
+    )
+    net_sign = "+" if net_change > 0 else ""
+    embed.add_field(
+        name="📊 Resultado líquido",
+        value=f"{net_sign}{format_coins(net_change)} moedas",
+        inline=True,
+    )
+    embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="moeda", description="Aposte em cara ou coroa e ganhe o dobro do retorno.")
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas para apostar.")
+@app_commands.choices(
+    escolha=[
+        app_commands.Choice(name="Cara", value="cara"),
+        app_commands.Choice(name="Coroa", value="coroa"),
+    ]
+)
+async def moeda(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    escolha: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    result = random.choice(("cara", "coroa"))
+    payout = aposta * 2 if escolha.value == result else 0
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir este resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="CARA OU COROA",
+        bet=aposta,
+        choice=f"Você escolheu **{escolha.name}**.",
+        result=f"A moeda caiu em **{result.capitalize()}**.",
+        payout=payout,
+        balance=balance,
+    )
+
+
+@bot.tree.command(name="dados", description="Aposte em par, ímpar ou no valor exato de um dado.")
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas para apostar.")
+@app_commands.choices(
+    escolha=[
+        app_commands.Choice(name="Par (retorno x2)", value="par"),
+        app_commands.Choice(name="Ímpar (retorno x2)", value="ímpar"),
+        *[
+            app_commands.Choice(name=f"Número {number} (retorno x5)", value=str(number))
+            for number in range(1, 7)
+        ],
+    ]
+)
+async def dados(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    escolha: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    roll = random.randint(1, 6)
+    if escolha.value in ("par", "ímpar"):
+        won = ("par" if roll % 2 == 0 else "ímpar") == escolha.value
+        multiplier = 2
+    else:
+        won = roll == int(escolha.value)
+        multiplier = 5
+
+    payout = aposta * multiplier if won else 0
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir este resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="DADOS",
+        bet=aposta,
+        choice=f"Você escolheu **{escolha.name}**.",
+        result=f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'}).",
+        payout=payout,
+        balance=balance,
+    )
+
+
+@bot.tree.command(name="roleta", description="Aposte em uma cor da roleta europeia.")
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas para apostar.")
+@app_commands.choices(
+    cor=[
+        app_commands.Choice(name="Vermelho (retorno x2)", value="vermelho"),
+        app_commands.Choice(name="Preto (retorno x2)", value="preto"),
+        app_commands.Choice(name="Verde / zero (retorno x36)", value="verde"),
+    ]
+)
+async def roleta(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    cor: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    number = random.randint(0, 36)
+    result_color = (
+        "verde"
+        if number == 0
+        else "vermelho"
+        if number in ROULETTE_RED_NUMBERS
+        else "preto"
+    )
+    multiplier = 36 if cor.value == "verde" else 2
+    payout = aposta * multiplier if cor.value == result_color else 0
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir este resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="ROLETA EUROPEIA",
+        bet=aposta,
+        choice=f"Você apostou em **{cor.name}**.",
+        result=f"A roleta parou no **{number} {result_color}**.",
+        payout=payout,
+        balance=balance,
+    )
+
+
+@bot.tree.command(
+    name="duelo",
+    description="Desafie alguém para dados ou jokenpô apostando moedas.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    oponente="Pessoa que você quer desafiar.",
+    aposta="Valor que cada jogador aposta.",
+    jogo="Escolha o jogo do desafio.",
+)
+@app_commands.choices(
+    jogo=[
+        app_commands.Choice(name="Dados (maior resultado vence)", value="dados"),
+        app_commands.Choice(name="Jokenpô", value="jokenpo"),
+    ]
+)
+async def duelo(
+    interaction: discord.Interaction,
+    oponente: discord.Member,
+    aposta: app_commands.Range[int, 1, 1_000_000],
+    jogo: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if oponente.id == interaction.user.id:
+        await interaction.response.send_message(
+            "Você não pode desafiar a si mesmo.",
+            ephemeral=True,
+        )
+        return
+    if oponente.bot:
+        await interaction.response.send_message(
+            "Desafios de aposta só podem ser feitos contra outra pessoa.",
+            ephemeral=True,
+        )
+        return
+
+    view = DuelView(interaction.user, oponente, aposta, jogo.value)
+    await interaction.response.send_message(embed=view.create_embed(), view=view)
+    view.message = await interaction.original_response()
+
+
+@bot.tree.command(name="blackjack", description="Joga uma partida de blackjack com o bot.")
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas que deseja apostar.")
+async def blackjack(interaction: discord.Interaction, aposta: int) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+
+    if aposta <= 0:
+        await interaction.response.send_message(
+            "A aposta precisa ser maior que zero.",
+            ephemeral=True,
+        )
+        return
+
+    house_owner_id = get_house_owner_id()
+    reserved, balance, reservation_or_reason = reserve_blackjack_bet(
+        interaction.user.id,
+        house_owner_id,
+        aposta,
+    )
+    if not reserved:
+        message = (
+            f"Saldo insuficiente. Você tem {format_coins(balance)} moedas."
+            if reservation_or_reason == "player"
+            else "A banca principal não tem saldo livre suficiente para cobrir "
+            "a aposta máxima desta partida."
+        )
+        await interaction.response.send_message(
+            message,
+            ephemeral=True,
+        )
+        return
+
+    buycards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+    player_cards = [random.choice(buycards), random.choice(buycards)]
+    dealer_cards = [random.choice(buycards), random.choice(buycards)]
+    game = BlackjackView(
+        interaction.user,
+        aposta,
+        player_cards,
+        dealer_cards,
+        balance,
+        house_owner_id,
+        reservation_or_reason,
+    )
+    if hand_total(player_cards) == 21:
+        game.result = "Blackjack! Sua mão inicial chegou a 21."
+        game._resolve()
+
+    await interaction.response.send_message(
+        embed=game.create_embed(),
+        view=None if game.finished else game,
+    )
+    if not game.finished:
+        game.message = await interaction.original_response()
+
+@bot.tree.command(name="clear", description="Apaga de 1 a 100 mensagens recentes do canal.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.checks.bot_has_permissions(manage_messages=True)
+@app_commands.describe(amount="Quantidade de mensagens a apagar (de 1 a 100).")
+async def clear(
+    interaction: discord.Interaction,
+    amount: app_commands.Range[int, 1, 100],
+) -> None:
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em canais de texto.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    deleted = await channel.purge(limit=amount)
+    await interaction.followup.send(
+        f"{len(deleted)} mensagens foram apagadas.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="kick", description="Expulsa um membro do servidor.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(kick_members=True)
+@app_commands.checks.bot_has_permissions(kick_members=True)
+@app_commands.describe(member="Membro a expulsar.", reason="Motivo opcional.")
+async def kick(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str | None = None,
+) -> None:
+    guild = interaction.guild
+    bot_member = guild.me if guild else None
+    if guild is None or bot_member is None:
+        await interaction.response.send_message(
+            "Não foi possível confirmar o membro do bot neste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if violates_moderation_hierarchy(interaction, member):
+        await interaction.response.send_message(
+            "Não posso expulsar esse membro por causa da hierarquia de cargos.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await member.kick(reason=reason)
+    await interaction.followup.send(f"{member} foi expulso do servidor.", ephemeral=True)
+
+
+@bot.tree.command(name="ban", description="Bane um membro do servidor.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.checks.bot_has_permissions(ban_members=True)
+@app_commands.describe(member="Membro a banir.", reason="Motivo opcional.")
+async def ban(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str | None = None,
+) -> None:
+    guild = interaction.guild
+    bot_member = guild.me if guild else None
+    if guild is None or bot_member is None:
+        await interaction.response.send_message(
+            "Não foi possível confirmar o membro do bot neste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if violates_moderation_hierarchy(interaction, member):
+        await interaction.response.send_message(
+            "Não posso banir esse membro por causa da hierarquia de cargos.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await member.ban(reason=reason)
+    await interaction.followup.send(f"{member} foi banido do servidor.", ephemeral=True)
+
+
+@bot.tree.command(name="unban", description="Desbane um usuário pelo ID.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.checks.bot_has_permissions(ban_members=True)
+@app_commands.describe(user_id="ID numérico do usuário a desbanir.", reason="Motivo opcional.")
+async def unban(
+    interaction: discord.Interaction,
+    user_id: str,
+    reason: str | None = None,
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        parsed_user_id = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "O ID precisa ser numérico.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        user = await bot.fetch_user(parsed_user_id)
+    except discord.NotFound:
+        await interaction.followup.send(
+            "Usuário não encontrado.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await guild.unban(user, reason=reason)
+    except discord.NotFound:
+        await interaction.followup.send(
+            "Esse usuário não está banido neste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(f"{user} foi desbanido do servidor.", ephemeral=True)
+
+
+async def get_or_create_muted_role(guild: discord.Guild) -> discord.Role:
+    muted_role = discord.utils.get(guild.roles, name="Muted")
+    if muted_role is not None:
+        return muted_role
+
+    muted_role = await guild.create_role(
+        name="Muted",
+        reason="Role usada pelo comando slash /mute",
+    )
+    for channel in guild.channels:
+        if isinstance(
+            channel,
+            (
+                discord.TextChannel,
+                discord.VoiceChannel,
+                discord.StageChannel,
+                discord.ForumChannel,
+                discord.CategoryChannel,
+            ),
+        ):
+            await channel.set_permissions(
+                muted_role,
+                send_messages=False,
+                send_messages_in_threads=False,
+                add_reactions=False,
+                speak=False,
+                connect=False,
+            )
+
+    return muted_role
+
+
+@bot.tree.command(name="mute", description="Silencia um membro usando o cargo Muted.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.checks.bot_has_permissions(manage_roles=True)
+@app_commands.describe(member="Membro a silenciar.", reason="Motivo opcional.")
+async def mute(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str | None = None,
+) -> None:
+    guild = interaction.guild
+    bot_member = guild.me if guild else None
+    if guild is None or bot_member is None:
+        await interaction.response.send_message(
+            "Não foi possível confirmar o membro do bot neste servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if violates_moderation_hierarchy(interaction, member):
+        await interaction.response.send_message(
+            "Não posso silenciar esse membro por causa da hierarquia de cargos.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    muted_role = await get_or_create_muted_role(guild)
+    if muted_role in member.roles:
+        await interaction.followup.send(f"{member} já está silenciado.", ephemeral=True)
+        return
+
+    await member.add_roles(
+        muted_role,
+        reason=reason or f"Silenciado por {interaction.user}",
+    )
+    await interaction.followup.send(f"{member} foi silenciado.", ephemeral=True)
+
+
+@bot.tree.command(name="unmute", description="Remove o cargo Muted de um membro.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.checks.bot_has_permissions(manage_roles=True)
+@app_commands.describe(member="Membro a dessilenciar.", reason="Motivo opcional.")
+async def unmute(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str | None = None,
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    muted_role = discord.utils.get(guild.roles, name="Muted")
+    if muted_role is None or muted_role not in member.roles:
+        await interaction.response.send_message(
+            f"{member} não está silenciado.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await member.remove_roles(
+        muted_role,
+        reason=reason or f"Dessilenciado por {interaction.user}",
+    )
+    await interaction.followup.send(f"{member} foi dessilenciado.", ephemeral=True)
+
+
+@bot.tree.command(name="say", description="Faz o bot repetir uma mensagem.")
+@app_commands.describe(message="Mensagem que o bot deve enviar.")
+async def say(interaction: discord.Interaction, message: str) -> None:
+    await interaction.response.send_message(
+        message,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="avatar", description="Mostra o avatar de um usuário.")
+@app_commands.describe(member="Usuário opcional; por padrão, mostra o seu avatar.")
+async def avatar(
+    interaction: discord.Interaction,
+    member: discord.User | None = None,
+) -> None:
+    target = member or interaction.user
+    embed = discord.Embed(
+        title=f"Avatar de {target}",
+        color=discord.Color.blue(),
+    )
+    embed.set_image(url=target.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="serverinfo", description="Mostra informações do servidor.")
+@app_commands.guild_only()
+async def serverinfo(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"Informações do servidor: {guild.name}",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="ID do servidor", value=str(guild.id), inline=False)
+    embed.add_field(
+        name="Dono do servidor",
+        value=guild.owner.mention if guild.owner else "Desconhecido",
+        inline=False,
+    )
+    embed.add_field(name="Membros", value=str(guild.member_count or "Desconhecido"), inline=False)
+    if guild.icon is not None:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="userinfo", description="Mostra informações de um usuário.")
+@app_commands.describe(member="Usuário opcional; por padrão, mostra suas informações.")
+async def userinfo(
+    interaction: discord.Interaction,
+    member: discord.Member | None = None,
+) -> None:
+    target = member or interaction.user
+    embed = discord.Embed(
+        title=f"Informações do usuário: {target}",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="ID", value=str(target.id), inline=False)
+    embed.add_field(name="Nome", value=target.name, inline=False)
+    embed.add_field(
+        name="Conta criada em",
+        value=discord.utils.format_dt(target.created_at, style="F"),
+        inline=False,
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    embed.add_field(
+        name="Entrou no servidor",
+        value=(
+            discord.utils.format_dt(target.joined_at, style="F")
+            if target.joined_at
+            else "Desconhecido"
+        ),
+        inline=False,
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="ajuda", description="Lista os comandos slash disponíveis.")
+async def ajuda(interaction: discord.Interaction) -> None:
+    command_lines = [
+        f"`/{command.name}` — {command.description}"
+        for command in bot.tree.get_commands()
+        if isinstance(command, app_commands.Command)
+    ]
+    embed = discord.Embed(
+        title="Comandos do bot",
+        description="\n".join(command_lines),
+        color=discord.Color.blue(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="shutdown", description="Desliga o bot.")
+@app_commands.check(is_bot_owner)
+async def shutdown(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("Desligando o bot...", ephemeral=True)
+    await bot.close()
+
+
+@bot.tree.command(name="restart", description="Explica como reiniciar o processo do bot.")
+@app_commands.check(is_bot_owner)
+async def restart(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        "O bot não pode reiniciar o próprio processo com segurança. Reinicie o serviço "
+        "ou processo que o executa.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="status", description="Define a atividade de jogo do bot.")
+@app_commands.check(is_bot_owner)
+@app_commands.describe(message="Texto da atividade.")
+async def status(interaction: discord.Interaction, message: str) -> None:
+    await bot.change_presence(activity=discord.Game(name=message))
+    await interaction.response.send_message(
+        f"Atividade do bot alterada para: {message}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="clear_status", description="Remove a atividade do bot.")
+@app_commands.check(is_bot_owner)
+async def clear_status(interaction: discord.Interaction) -> None:
+    await bot.change_presence(activity=None)
+    await interaction.response.send_message(
+        "Atividade do bot removida.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="set_activity", description="Define uma atividade do bot.")
+@app_commands.check(is_bot_owner)
+@app_commands.describe(
+    activity_type="playing, streaming, listening ou watching.",
+    message="Texto da atividade.",
+    url="URL obrigatória para streaming.",
+)
+async def set_activity(
+    interaction: discord.Interaction,
+    activity_type: Literal["playing", "streaming", "listening", "watching"],
+    message: str,
+    url: str | None = None,
+) -> None:
+    activity_type = activity_type.lower()
+    if activity_type == "playing":
+        activity: discord.BaseActivity = discord.Game(name=message)
+    elif activity_type == "streaming":
+        if url is None:
+            await interaction.response.send_message(
+                "Informe uma URL válida para a atividade de streaming.",
+                ephemeral=True,
+            )
+            return
+        activity = discord.Streaming(name=message, url=url)
+    elif activity_type == "listening":
+        activity = discord.Activity(
+            type=discord.ActivityType.listening,
+            name=message,
+        )
+    elif activity_type == "watching":
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name=message,
+        )
+    else:
+        await interaction.response.send_message(
+            "Tipo inválido. Use: playing, streaming, listening ou watching.",
+            ephemeral=True,
+        )
+        return
+
+    await bot.change_presence(activity=activity)
+    await interaction.response.send_message(
+        f"Atividade alterada para: {activity_type} {message}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="clear_activity", description="Remove a atividade do bot.")
+@app_commands.check(is_bot_owner)
+async def clear_activity(interaction: discord.Interaction) -> None:
+    await bot.change_presence(activity=None)
+    await interaction.response.send_message(
+        "Atividade do bot removida.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="set_status_type", description="Define o status online, idle, dnd ou invisible.")
+@app_commands.check(is_bot_owner)
+@app_commands.describe(status_type="online, idle, dnd ou invisible.")
+async def set_status_type(
+    interaction: discord.Interaction,
+    status_type: Literal["online", "idle", "dnd", "invisible"],
+) -> None:
+    status_map = {
+        "online": discord.Status.online,
+        "idle": discord.Status.idle,
+        "dnd": discord.Status.dnd,
+        "invisible": discord.Status.invisible,
+    }
+    selected_status = status_map.get(status_type.lower())
+    if selected_status is None:
+        await interaction.response.send_message(
+            "Status inválido. Use: online, idle, dnd ou invisible.",
+            ephemeral=True,
+        )
+        return
+
+    await bot.change_presence(status=selected_status)
+    await interaction.response.send_message(
+        f"Status alterado para: {status_type.lower()}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="clear_status_type", description="Redefine o status do bot para online.")
+@app_commands.check(is_bot_owner)
+async def clear_status_type(interaction: discord.Interaction) -> None:
+    await bot.change_presence(status=discord.Status.online)
+    await interaction.response.send_message(
+        "Status do bot alterado para online.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+) -> None:
+    if isinstance(error, app_commands.MissingPermissions):
+        message = "Você não tem as permissões necessárias para este comando."
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        message = "O bot não tem as permissões necessárias para executar este comando."
+    elif isinstance(error, app_commands.CheckFailure):
+        message = "Você não tem autorização para usar este comando."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        message = f"Tente novamente em {error.retry_after:.1f} segundos."
+    else:
+        original = getattr(error, "original", error)
+        logger.error(
+            "Erro ao executar /%s",
+            interaction.command.name if interaction.command else "desconhecido",
+            exc_info=(type(original), original, original.__traceback__),
+        )
+        message = "Ocorreu um erro ao executar o comando. O erro foi registrado."
+
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
