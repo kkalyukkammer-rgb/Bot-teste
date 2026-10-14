@@ -5208,7 +5208,11 @@ async def corrida(
         selected_animals.append(animal_2)
     if animal_3 is not None:
         selected_animals.append(animal_3)
-
+git add main.py
+git commit -m "Descreve a alteração"
+git pushgit add main.py
+git commit -m "Descreve a alteração"
+git push
     if len(set(selected_animals)) != len(selected_animals):
         await interaction.response.send_message(
             "Escolha animais diferentes em cada opção.",
