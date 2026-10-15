@@ -6,6 +6,7 @@ import math
 import os
 import random
 import sqlite3
+import tempfile
 import time
 from typing import Literal
 
@@ -25,9 +26,13 @@ MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
 MAIN_HOUSE_UPGRADE_NPC_BONUS = 10
+PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+BACKUP_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "backup")
+DEFAULT_ECONOMY_DB_PATH = os.path.join(BACKUP_DIRECTORY, "economy.sqlite3")
+LEGACY_ECONOMY_DB_PATH = os.path.join(PROJECT_DIRECTORY, "economy.sqlite3")
 ECONOMY_DB_PATH = os.getenv(
     "ECONOMY_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "economy.sqlite3"),
+    DEFAULT_ECONOMY_DB_PATH,
 )
 REWARD_SETTINGS = {
     "daily": ("daily_claim_at", 24 * 60 * 60, 1, 100, "diária"),
@@ -155,6 +160,19 @@ def initialize_economy() -> None:
     database_directory = os.path.dirname(ECONOMY_DB_PATH)
     if database_directory:
         os.makedirs(database_directory, exist_ok=True)
+
+    if (
+        os.path.abspath(ECONOMY_DB_PATH)
+        == os.path.abspath(DEFAULT_ECONOMY_DB_PATH)
+        and migrate_legacy_economy_database(
+            ECONOMY_DB_PATH,
+            LEGACY_ECONOMY_DB_PATH,
+        )
+    ):
+        logger.info(
+            "Banco de economia existente copiado para o backup persistente: %s",
+            ECONOMY_DB_PATH,
+        )
 
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         connection.execute(
@@ -440,6 +458,36 @@ def initialize_economy() -> None:
                     "ALTER TABLE guild_casino_accounts "
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
+
+
+def migrate_legacy_economy_database(
+    database_path: str,
+    legacy_database_path: str,
+) -> bool:
+    if (
+        os.path.abspath(database_path) == os.path.abspath(legacy_database_path)
+        or os.path.exists(database_path)
+        or not os.path.isfile(legacy_database_path)
+    ):
+        return False
+
+    database_directory = os.path.dirname(os.path.abspath(database_path))
+    os.makedirs(database_directory, exist_ok=True)
+    temporary_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".economy-migration-",
+        suffix=".sqlite3",
+        dir=database_directory,
+    )
+    os.close(temporary_descriptor)
+    try:
+        with closing(sqlite3.connect(legacy_database_path)) as source:
+            with closing(sqlite3.connect(temporary_path)) as destination:
+                source.backup(destination)
+        os.replace(temporary_path, database_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return True
 
 
 def get_betting_channel_id(guild_id: int) -> int | None:
@@ -2197,6 +2245,57 @@ def create_guild_casino(
         )
 
 
+def delete_guild_casino(
+    guild_id: int,
+    user_id: int,
+) -> tuple[str, int, int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        casino = connection.execute(
+            """
+            SELECT owner_id, treasury
+            FROM guild_casinos WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if casino is None:
+            return "missing", 0, 0
+
+        owner_id, treasury = casino
+        if owner_id != user_id:
+            return "not_owner", 0, 0
+        if treasury < 0:
+            raise RuntimeError(
+                f"O caixa do cassino {guild_id} não pode ser negativo."
+            )
+
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        global_balance = connection.execute(
+            "SELECT balance FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?
+            WHERE user_id = ?
+            """,
+            (treasury, treasury, user_id),
+        )
+        connection.execute(
+            "DELETE FROM guild_casino_accounts WHERE guild_id = ?",
+            (guild_id,),
+        )
+        connection.execute(
+            "DELETE FROM guild_casinos WHERE guild_id = ?",
+            (guild_id,),
+        )
+        return "deleted", global_balance + treasury, treasury
+
+
 def claim_guild_casino_reward(
     guild_id: int,
     user_id: int,
@@ -2919,6 +3018,87 @@ class PrestigeUpgradeView(discord.ui.View):
     ) -> None:
         await interaction.response.edit_message(
             content="Compra cancelada.",
+            embed=None,
+            view=None,
+        )
+
+
+class DeleteGuildCasinoView(discord.ui.View):
+    def __init__(
+        self,
+        guild_id: int,
+        owner_id: int,
+        casino_name: str,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        self.casino_name = casino_name
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "Somente quem iniciou a exclusão pode confirmá-la.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Excluir cassino",
+        emoji="🗑️",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer()
+        status, balance, treasury = delete_guild_casino(
+            self.guild_id,
+            interaction.user.id,
+        )
+        if status == "deleted":
+            if interaction.guild is not None:
+                await synchronize_casino_autoroles(interaction.guild)
+            message = (
+                f"🗑️ O cassino **{self.casino_name}** foi excluído. "
+                f"As {format_coins(treasury)} moedas locais restantes foram "
+                f"convertidas na proporção de 1:1 para o saldo global do dono. "
+                f"Novo saldo global: **{format_coins(balance)} moedas**. "
+                "Os saldos locais dos jogadores e o histórico do cassino "
+                "foram apagados."
+            )
+        elif status == "missing":
+            message = "Este servidor não possui mais um cassino para excluir."
+        else:
+            message = (
+                "A propriedade do cassino mudou. Somente o dono atual pode "
+                "excluí-lo."
+            )
+        button.disabled = True
+        self.stop()
+        await interaction.edit_original_response(
+            content=message,
+            embed=None,
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="✖️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Exclusão cancelada; nenhum dado foi alterado.",
             embed=None,
             view=None,
         )
@@ -4456,6 +4636,48 @@ async def criar_cassino(
 
 
 @bot.tree.command(
+    name="excluir_cassino",
+    description="Exclui seu cassino, converte o caixa e remove os dados locais.",
+)
+@app_commands.guild_only()
+async def excluir_cassino(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser usado em um servidor.",
+            ephemeral=True,
+        )
+        return
+
+    casino = get_guild_casino(guild.id)
+    if casino is None:
+        await interaction.response.send_message(
+            "Este servidor ainda não tem um cassino para excluir.",
+            ephemeral=True,
+        )
+        return
+
+    owner_id, name, currency_name, treasury, _ = casino
+    if interaction.user.id != owner_id:
+        await interaction.response.send_message(
+            "Somente o proprietário do cassino pode excluí-lo.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Tem certeza que deseja excluir **{name}**? Ao confirmar, o caixa "
+        f"atual de **{format_coins(treasury)} {currency_name}** será convertido "
+        "em moedas globais na proporção de 1:1 para você. Todos os saldos "
+        "locais dos jogadores e o histórico deste cassino serão apagados "
+        "permanentemente. O valor transferido será o caixa no momento da "
+        "confirmação.",
+        view=DeleteGuildCasinoView(guild.id, owner_id, name),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
     name="contratar_npcs_cassino",
     description="Aumenta a quantidade de NPCs que apostam no seu cassino.",
 )
@@ -5208,11 +5430,6 @@ async def corrida(
         selected_animals.append(animal_2)
     if animal_3 is not None:
         selected_animals.append(animal_3)
-git add main.py
-git commit -m "Descreve a alteração"
-git pushgit add main.py
-git commit -m "Descreve a alteração"
-git push
     if len(set(selected_animals)) != len(selected_animals):
         await interaction.response.send_message(
             "Escolha animais diferentes em cada opção.",
