@@ -254,6 +254,10 @@ def initialize_economy() -> None:
                 ("main_house_npc_owner_online", 0),
                 ("main_house_games", 0),
                 ("main_house_npc_games", 0),
+                ("main_house_player_bet_volume", 0),
+                ("main_house_player_bet_count", 0),
+                ("main_house_player_bet_earned", 0),
+                ("main_house_player_bet_lost", 0),
                 ("main_house_upgrade_level", 0),
                 ("main_house_upgrade_costs_paid", 0),
                 ("main_house_npc_count_upgrade_level", 0),
@@ -310,7 +314,11 @@ def initialize_economy() -> None:
                 npc_hiring_costs INTEGER NOT NULL DEFAULT 0,
                 rewards_paid INTEGER NOT NULL DEFAULT 0,
                 npc_next_bet_at INTEGER NOT NULL DEFAULT 0,
-                npc_owner_online INTEGER NOT NULL DEFAULT 0
+                npc_owner_online INTEGER NOT NULL DEFAULT 0,
+                player_bet_volume INTEGER NOT NULL DEFAULT 0,
+                player_bet_count INTEGER NOT NULL DEFAULT 0,
+                player_bet_earned INTEGER NOT NULL DEFAULT 0,
+                player_bet_lost INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -330,6 +338,10 @@ def initialize_economy() -> None:
             "rewards_paid": 0,
             "npc_next_bet_at": 0,
             "npc_owner_online": 0,
+            "player_bet_volume": 0,
+            "player_bet_count": 0,
+            "player_bet_earned": 0,
+            "player_bet_lost": 0,
         }
         for column, default in casino_migrations.items():
             if column not in casino_columns:
@@ -987,12 +999,43 @@ def increment_house_stat(
     setting: str,
     amount: int = 1,
 ) -> None:
-    if setting not in {"main_house_games", "main_house_npc_games"}:
+    if setting not in {
+        "main_house_games",
+        "main_house_npc_games",
+        "main_house_player_bet_volume",
+        "main_house_player_bet_count",
+        "main_house_player_bet_earned",
+        "main_house_player_bet_lost",
+    }:
         raise ValueError(f"Estatística da casa desconhecida: {setting}")
     connection.execute(
         "UPDATE casino_settings SET value = value + ? WHERE setting = ?",
         (amount, setting),
     )
+
+
+def record_main_house_player_bet(
+    connection: sqlite3.Connection,
+    volume: int,
+    count: int,
+    house_change: int,
+) -> None:
+    if volume < 0 or count < 0:
+        raise ValueError("As métricas da aposta não podem ser negativas.")
+    increment_house_stat(connection, "main_house_player_bet_volume", volume)
+    increment_house_stat(connection, "main_house_player_bet_count", count)
+    if house_change > 0:
+        increment_house_stat(
+            connection,
+            "main_house_player_bet_earned",
+            house_change,
+        )
+    elif house_change < 0:
+        increment_house_stat(
+            connection,
+            "main_house_player_bet_lost",
+            -house_change,
+        )
 
 
 def get_main_house_status() -> dict[str, int]:
@@ -1011,6 +1054,10 @@ def get_main_house_status() -> dict[str, int]:
                 WHERE setting IN (
                     'main_house_games', 'main_house_npc_games', 'main_house_npcs',
                     'main_house_upgrade_costs_paid',
+                    'main_house_player_bet_volume',
+                    'main_house_player_bet_count',
+                    'main_house_player_bet_earned',
+                    'main_house_player_bet_lost',
                     'main_house_npc_count_upgrade_level',
                     'main_house_npc_count_upgrade_costs_paid',
                     'main_house_npc_bet_upgrade_level',
@@ -1048,6 +1095,22 @@ def get_main_house_status() -> dict[str, int]:
         "total_lost": total_lost,
         "games": house_stats.get("main_house_games", 0),
         "npc_games": house_stats.get("main_house_npc_games", 0),
+        "player_bet_volume": house_stats.get(
+            "main_house_player_bet_volume",
+            0,
+        ),
+        "player_bet_count": house_stats.get(
+            "main_house_player_bet_count",
+            0,
+        ),
+        "player_bet_earned": house_stats.get(
+            "main_house_player_bet_earned",
+            0,
+        ),
+        "player_bet_lost": house_stats.get(
+            "main_house_player_bet_lost",
+            0,
+        ),
         "npc_count": npc_count,
         "npc_count_upgrade_level": npc_count_upgrade_level,
         "npc_bet_upgrade_level": npc_bet_upgrade_level,
@@ -1416,6 +1479,7 @@ def settle_house_bet(
             return False, player_balance, house_balance
 
         record_bet_activity(connection, user_id, bet)
+        record_main_house_player_bet(connection, bet, 1, house_change)
         connection.execute(
             """
             UPDATE economy_accounts
@@ -1551,6 +1615,7 @@ def settle_blackjack_bet(
             raise RuntimeError(
                 "A reserva de blackjack não cobre o prêmio desta partida."
             )
+        record_main_house_player_bet(connection, bet, 1, house_change)
         connection.execute(
             """
             UPDATE economy_accounts
@@ -1645,6 +1710,7 @@ def settle_duel_bets(
         )
         if winner_id is None:
             winner_winnings = 0
+            house_change = 0
             connection.executemany(
                 """
                 UPDATE economy_accounts
@@ -1703,6 +1769,12 @@ def settle_duel_bets(
                 ),
             )
 
+        record_main_house_player_bet(
+            connection,
+            amount * 2,
+            2,
+            house_change,
+        )
         increment_house_stat(connection, "main_house_games")
         balances = {
             user_id: balance
@@ -1772,6 +1844,7 @@ def settle_animal_house_bet(
             return "house", player_balance, house_balance
 
         record_bet_activity(connection, user_id, amount)
+        record_main_house_player_bet(connection, amount, 1, house_change)
         connection.execute(
             """
             UPDATE economy_accounts
@@ -1837,6 +1910,10 @@ def get_guild_casino_status(
     int,
     int,
     int,
+    int,
+    int,
+    int,
+    int,
 ] | None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         return connection.execute(
@@ -1844,7 +1921,8 @@ def get_guild_casino_status(
             SELECT owner_id, name, currency_name, treasury, upgrade_level,
                    npc_count, games_played, npc_games, house_earned,
                    house_lost, tax_paid, upgrade_costs_paid,
-                   npc_hiring_costs, rewards_paid
+                   npc_hiring_costs, rewards_paid, player_bet_volume,
+                   player_bet_count, player_bet_earned, player_bet_lost
             FROM guild_casinos WHERE guild_id = ?
             """,
             (guild_id,),
@@ -2398,6 +2476,7 @@ def get_guild_casino_leaderboard(
 def upgrade_guild_casino(
     guild_id: int,
     user_id: int,
+    expected_level: int | None = None,
 ) -> tuple[str, int, int, int]:
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -2413,6 +2492,8 @@ def upgrade_guild_casino(
         owner_id, treasury, level = casino
         if user_id != owner_id:
             return "not_owner", treasury, level, 0
+        if expected_level is not None and level != expected_level:
+            return "changed", treasury, level, 0
         if level >= len(CASINO_UPGRADE_COSTS):
             return "max_level", treasury, level, 0
         cost = CASINO_UPGRADE_COSTS[level]
@@ -2532,12 +2613,17 @@ def settle_guild_casino_bet(
                 user_id,
             ),
         )
+        record_main_house_player_bet(connection, bet, 1, tax)
         connection.execute(
             """
             UPDATE guild_casinos
             SET treasury = treasury + ?, games_played = games_played + 1,
                 house_earned = house_earned + ?,
-                house_lost = house_lost + ?, tax_paid = tax_paid + ?
+                house_lost = house_lost + ?, tax_paid = tax_paid + ?,
+                player_bet_volume = player_bet_volume + ?,
+                player_bet_count = player_bet_count + 1,
+                player_bet_earned = player_bet_earned + ?,
+                player_bet_lost = player_bet_lost + ?
             WHERE guild_id = ?
             """,
             (
@@ -2545,6 +2631,9 @@ def settle_guild_casino_bet(
                 max(casino_gain, 0),
                 max(-casino_gain, 0),
                 tax,
+                bet,
+                max(casino_gain, 0),
+                max(-casino_gain, 0),
                 guild_id,
             ),
         )
@@ -2992,6 +3081,31 @@ class PrestigeUpgradeView(discord.ui.View):
                 f"✅ Upgrade **{upgrade_name}** elevado ao nível **{level}** "
                 f"por **{cost} pontos**. Saldo: **{points} pontos**."
             )
+            next_cost = level + 1
+            if (
+                level < PRESTIGE_MAX_UPGRADE_LEVEL
+                and points >= next_cost
+            ):
+                message += (
+                    f"\n\nVocê já pode comprar o nível **{level + 1}** "
+                    f"por **{next_cost} pontos**. Deseja continuar?"
+                )
+                next_view = PrestigeUpgradeView(
+                    self.user_id,
+                    self.upgrade_key,
+                )
+                await interaction.response.edit_message(
+                    content=message,
+                    embed=None,
+                    view=next_view,
+                )
+                self.stop()
+                return
+            if level < PRESTIGE_MAX_UPGRADE_LEVEL:
+                message += (
+                    f"\nPróximo nível: **{level + 1}**, custo de "
+                    f"**{next_cost} pontos**."
+                )
         elif status == "insufficient":
             message = (
                 f"Pontos insuficientes: a melhoria custa **{cost} pontos** "
@@ -4373,6 +4487,64 @@ class MainHouseUpgradeView(discord.ui.View):
                     f"{format_coins(npc_bet_max)} moedas**."
                 )
 
+            updated_status = get_main_house_status()
+            next_level = updated_status[
+                "npc_count_upgrade_level"
+                if self.upgrade_type == "npc_count"
+                else "npc_bet_upgrade_level"
+            ]
+            next_cost = updated_status[
+                "next_npc_count_upgrade_cost"
+                if self.upgrade_type == "npc_count"
+                else "next_npc_bet_upgrade_cost"
+            ]
+            can_continue = (
+                next_cost > 0
+                and updated_status["balance"] >= next_cost
+                and (
+                    self.upgrade_type != "npc_count"
+                    or updated_status["npc_count"] < CASINO_MAX_NPCS
+                )
+            )
+            if can_continue:
+                if self.upgrade_type == "npc_count":
+                    next_effect = (
+                        f"A quantidade de NPCs passará de **"
+                        f"{updated_status['npc_count']}** para **"
+                        f"{min(CASINO_MAX_NPCS, updated_status['npc_count'] + MAIN_HOUSE_UPGRADE_NPC_BONUS)}**."
+                    )
+                    next_expected_npc_count = updated_status["npc_count"]
+                else:
+                    next_min, next_max = main_house_npc_bet_range(next_level + 1)
+                    next_effect = (
+                        f"A faixa de aposta de cada NPC passará para "
+                        f"**{format_coins(next_min)}–{format_coins(next_max)} moedas**."
+                    )
+                    next_expected_npc_count = None
+                message += (
+                    f"\n\nPróximo upgrade (nível **{next_level + 1}**): "
+                    f"{next_effect}\nCusto: **{format_coins(next_cost)} "
+                    "moedas**. Deseja continuar?"
+                )
+                next_view = MainHouseUpgradeView(
+                    self.user_id,
+                    self.upgrade_type,
+                    next_level,
+                    next_expected_npc_count,
+                )
+                await interaction.response.edit_message(
+                    content=message,
+                    embed=None,
+                    view=next_view,
+                )
+                self.stop()
+                return
+            if next_cost > 0 and updated_status["balance"] < next_cost:
+                message += (
+                    f"\nPróximo upgrade custa **{format_coins(next_cost)} "
+                    "moedas**; saldo insuficiente para continuar."
+                )
+
         _button.disabled = True
         self.stop()
         await interaction.response.edit_message(
@@ -4522,12 +4694,12 @@ async def status_casa_principal(interaction: discord.Interaction) -> None:
         inline=True,
     )
     embed.add_field(
-        name="Jogos liquidados",
+        name="Jogos da casa",
         value=format_coins(status["games"]),
         inline=True,
     )
     embed.add_field(
-        name="Apostas de NPCs",
+        name="Atividade de NPCs",
         value=(
             f"{format_coins(status['npc_games'])} apostas históricas | "
             f"{status['npc_count']} NPCs ativos | "
@@ -4535,6 +4707,24 @@ async def status_casa_principal(interaction: discord.Interaction) -> None:
             f"{format_coins(status['npc_bet_max'])}"
         ),
         inline=True,
+    )
+    player_bet_net = (
+        status["player_bet_earned"] - status["player_bet_lost"]
+    )
+    player_bet_net_sign = "+" if player_bet_net > 0 else ""
+    embed.add_field(
+        name="Apostas de jogadores — todas as casas",
+        value=(
+            f"Volume apostado: **{format_coins(status['player_bet_volume'])} moedas**\n"
+            f"Apostas: **{format_coins(status['player_bet_count'])}**\n"
+            f"Ganhos da casa com apostas: **"
+            f"{format_coins(status['player_bet_earned'])} moedas**\n"
+            f"Prêmios pagos pela casa principal: **"
+            f"{format_coins(status['player_bet_lost'])} moedas**\n"
+            f"Resultado líquido das apostas: **{player_bet_net_sign}"
+            f"{format_coins(player_bet_net)} moedas**"
+        ),
+        inline=False,
     )
     embed.add_field(
         name="Upgrades da casa",
@@ -4982,6 +5172,10 @@ async def status_cassino(interaction: discord.Interaction) -> None:
         upgrade_costs_paid,
         npc_hiring_costs,
         rewards_paid,
+        player_bet_volume,
+        player_bet_count,
+        player_bet_earned,
+        player_bet_lost,
     ) = status
     if interaction.user.id != owner_id:
         await interaction.response.send_message(
@@ -4992,6 +5186,8 @@ async def status_cassino(interaction: discord.Interaction) -> None:
 
     net_operating_profit = house_earned - house_lost - tax_paid
     net_sign = "+" if net_operating_profit > 0 else ""
+    player_bet_net = player_bet_earned - player_bet_lost
+    player_bet_net_sign = "+" if player_bet_net > 0 else ""
     embed = discord.Embed(
         title=f"Status do cassino — {name}",
         description=f"Estatísticas privadas de **{guild.name}**.",
@@ -5007,15 +5203,31 @@ async def status_cassino(interaction: discord.Interaction) -> None:
         inline=False,
     )
     embed.add_field(
-        name="Apostas e resultado da casa",
+        name="Operação de NPCs",
         value=(
-            f"Jogos liquidados: **{format_coins(games_played)}**\n"
             f"Apostas de NPCs: **{format_coins(npc_games)}**\n"
             f"Ganhos brutos: **{format_coins(house_earned)} {currency_name}**\n"
             f"Perdas: **{format_coins(house_lost)} {currency_name}**\n"
-            f"Taxas enviadas à casa principal: **{format_coins(tax_paid)} {currency_name}**\n"
+            f"Taxas enviadas à casa principal: "
+            f"**{format_coins(tax_paid)} {currency_name}**\n"
             f"Resultado operacional líquido: **{net_sign}"
             f"{format_coins(net_operating_profit)} {currency_name}**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Apostas de jogadores",
+        value=(
+            f"Jogos liquidados: **{format_coins(games_played)}**\n"
+            f"Volume apostado: **{format_coins(player_bet_volume)} "
+            f"{currency_name}**\n"
+            f"Apostas: **{format_coins(player_bet_count)}**\n"
+            f"Ganhos brutos do cassino: **{format_coins(player_bet_earned)} "
+            f"{currency_name}**\n"
+            f"Prêmios pagos aos jogadores: **{format_coins(player_bet_lost)} "
+            f"{currency_name}**\n"
+            f"Resultado líquido: **{player_bet_net_sign}"
+            f"{format_coins(player_bet_net)} {currency_name}**"
         ),
         inline=False,
     )
@@ -5075,9 +5287,163 @@ async def leaderboard_cassino(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
+def create_guild_casino_upgrade_embed(
+    treasury: int,
+    level: int,
+    currency_name: str,
+) -> discord.Embed:
+    cost = CASINO_UPGRADE_COSTS[level]
+    next_level = level + 1
+    unlocked_game = next(
+        game
+        for game, required_level in CASINO_GAME_UNLOCKS.items()
+        if required_level == next_level
+    )
+    embed = discord.Embed(
+        title=f"Confirmar upgrade do cassino — nível {next_level}",
+        description=(
+            f"O jogo **{unlocked_game}** será liberado e a taxa da casa "
+            f"principal reduzirá em {CASINO_TAX_REDUCTION_PER_LEVEL} ponto "
+            f"percentual por nível, até o mínimo de "
+            f"{CASINO_MINIMUM_TAX_PERCENT}%."
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Custo",
+        value=f"**{format_coins(cost)} {currency_name}**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Caixa após a compra",
+        value=f"**{format_coins(treasury - cost)} {currency_name}**",
+        inline=True,
+    )
+    return embed
+
+
+class GuildCasinoUpgradeView(discord.ui.View):
+    def __init__(self, guild_id: int, owner_id: int, expected_level: int) -> None:
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        self.expected_level = expected_level
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "Somente o proprietário do cassino pode confirmar este upgrade.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Confirmar upgrade",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        status, treasury, level, cost = upgrade_guild_casino(
+            self.guild_id,
+            self.owner_id,
+            self.expected_level,
+        )
+        if status == "upgraded":
+            casino = get_guild_casino(self.guild_id)
+            currency_name = casino[2] if casino is not None else "moedas"
+            unlocked_game = next(
+                game
+                for game, required_level in CASINO_GAME_UNLOCKS.items()
+                if required_level == level
+            )
+            message = (
+                f"✅ Cassino promovido ao nível **{level}**! "
+                f"Jogo liberado: **{unlocked_game}**. Os **"
+                f"{format_coins(cost)} {currency_name}** foram pagos à "
+                "casa principal."
+            )
+            if level < len(CASINO_UPGRADE_COSTS):
+                next_cost = CASINO_UPGRADE_COSTS[level]
+                if treasury >= next_cost:
+                    message += (
+                        f"\n\nO próximo upgrade custa **"
+                        f"{format_coins(next_cost)} {currency_name}**. "
+                        "Deseja continuar?"
+                    )
+                    next_view = GuildCasinoUpgradeView(
+                        self.guild_id,
+                        self.owner_id,
+                        level,
+                    )
+                    next_embed = create_guild_casino_upgrade_embed(
+                        treasury,
+                        level,
+                        currency_name,
+                    )
+                    self.stop()
+                    await interaction.response.edit_message(
+                        content=message,
+                        embed=next_embed,
+                        view=next_view,
+                    )
+                    return
+                message += (
+                    f"\nO próximo nível custa **"
+                    f"{format_coins(next_cost)} {currency_name}**; "
+                    "o caixa atual não permite continuar."
+                )
+        elif status == "missing":
+            message = "Este servidor ainda não tem um cassino. Use `/criar_cassino`."
+        elif status == "not_owner":
+            message = "Somente o proprietário atual do cassino pode melhorá-lo."
+        elif status == "changed":
+            message = (
+                "O nível do cassino mudou desde a prévia. Nenhum valor foi "
+                "debitado; execute `/upgrade_cassino` novamente."
+            )
+        elif status == "max_level":
+            message = "O cassino já está no nível máximo."
+        else:
+            message = (
+                f"Caixa insuficiente: o upgrade custa "
+                f"**{format_coins(cost)} moedas**, mas o caixa disponível é "
+                f"**{format_coins(treasury)} moedas**."
+            )
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content=message,
+            embed=None,
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="✖️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Upgrade cancelado; nenhum valor foi debitado.",
+            embed=None,
+            view=None,
+        )
+
+
 @bot.tree.command(
     name="upgrade_cassino",
-    description="Melhora o cassino, reduz a taxa e libera um novo jogo.",
+    description="Pré-visualiza e confirma um upgrade do cassino.",
 )
 @app_commands.guild_only()
 async def upgrade_cassino(interaction: discord.Interaction) -> None:
@@ -5088,40 +5454,35 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
             ephemeral=True,
         )
         return
-    status, treasury, level, cost = upgrade_guild_casino(
-        guild.id,
-        interaction.user.id,
-    )
-    if status == "missing":
+    casino = get_guild_casino(guild.id)
+    if casino is None:
         message = "Este servidor ainda não tem um cassino. Use `/criar_cassino`."
-    elif status == "not_owner":
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+    owner_id, _, currency_name, treasury, level = casino
+    if interaction.user.id != owner_id:
         message = "Somente o proprietário do cassino pode comprar upgrades."
-    elif status == "max_level":
-        message = "O cassino já está no nível máximo."
-    elif status == "insufficient":
-        message = (
-            f"O upgrade custa {format_coins(cost)} moedas locais. "
-            f"O caixa tem {format_coins(treasury)}."
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+    if level >= len(CASINO_UPGRADE_COSTS):
+        await interaction.response.send_message(
+            "O cassino já está no nível máximo.",
+            ephemeral=True,
         )
-    else:
-        unlocked_game = next(
-            game
-            for game, required_level in CASINO_GAME_UNLOCKS.items()
-            if required_level == level
+        return
+    cost = CASINO_UPGRADE_COSTS[level]
+    if treasury < cost:
+        await interaction.response.send_message(
+            f"O upgrade custa **{format_coins(cost)} {currency_name}**, "
+            f"mas o caixa tem **{format_coins(treasury)} {currency_name}**.",
+            ephemeral=True,
         )
-        casino = get_guild_casino(guild.id)
-        currency_name = casino[2] if casino is not None else "moedas"
-        message = (
-            f"⬆️ Cassino promovido ao nível **{level}**! "
-            f"Jogo liberado: **{unlocked_game}**. "
-            f"A taxa da casa principal cai em {CASINO_TAX_REDUCTION_PER_LEVEL} "
-            f"ponto percentual por nível, até o mínimo de "
-            f"{CASINO_MINIMUM_TAX_PERCENT}%. Os {format_coins(cost)} "
-            f"{currency_name} do upgrade foram pagos à casa principal. "
-            f"Caixa restante: "
-            f"{format_coins(treasury)} {currency_name}."
-        )
-    await interaction.response.send_message(message)
+        return
+    await interaction.response.send_message(
+        embed=create_guild_casino_upgrade_embed(treasury, level, currency_name),
+        view=GuildCasinoUpgradeView(guild.id, owner_id, level),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(

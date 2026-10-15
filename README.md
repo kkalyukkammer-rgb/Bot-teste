@@ -17,6 +17,18 @@ Git para não publicar dados dos usuários.
 Para usar outro local para o banco, defina a variável de ambiente
 `ECONOMY_DB_PATH` antes de iniciar o bot.
 
+## Status e upgrades
+
+`/status_casa_principal` separa o volume e a quantidade de apostas dos
+jogadores dos dados de atividade de NPCs; também mostra o resultado líquido
+das apostas e taxas recebidas de cassinos locais. `/status_cassino` mostra,
+em categorias distintas, as apostas de jogadores e a operação de NPCs.
+
+Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
+`/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada
+compra, a mensagem oferece o próximo nível do mesmo upgrade para confirmação
+quando houver saldo suficiente.
+
 ## Excluir um cassino
 
 O dono pode usar `/excluir_cassino` no servidor. O bot pede confirmação;
