@@ -1482,11 +1482,14 @@ async def send_bet_result(
             attachments=[file] if file is not None else [],
         )
     else:
-        await interaction.response.send_message(
-            embed=embed,
-            view=view,
-            file=file,
-        )
+        if file is None:
+            await interaction.response.send_message(embed=embed, view=view)
+        else:
+            await interaction.response.send_message(
+                embed=embed,
+                view=view,
+                file=file,
+            )
 
 
 class BetAgainView(discord.ui.View):
