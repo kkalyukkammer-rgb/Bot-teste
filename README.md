@@ -43,15 +43,16 @@ Qualquer apostador pode usar `/feedback` para enviar uma sugestão ou opinião
 diretamente por mensagem privada ao owner do bot. O bot confirma em uma
 resposta privada se a entrega foi concluída.
 
-Quando iniciar com novos commits Git, o bot publica os títulos desses commits
-no canal `1560451788254216343` do servidor `1467549007932030998`. Se ainda não
+Ao iniciar com novos commits Git, o bot publica no canal
+`1560451788254216343` do servidor `1467549007932030998` um anúncio formatado
+com as atualizações e menciona o cargo `1559362476921987072`. Se ainda não
 houver um commit anunciado salvo, publica somente o commit mais recente para
 evitar enviar o histórico inteiro. O processo precisa ter Git e o repositório
-disponível, além de permissão para enviar mensagens e embeds nesse canal.
+disponível, além de permissão para enviar mensagens e embeds nesse canal; o
+cargo deve existir no servidor e ser mencionável pelo bot.
 O owner também pode usar `/anunciar_update` para publicar manualmente os
-commits disponíveis e mencionar o cargo `1559362476921987072`. Se não houver
-commits novos, o comando permite reenviar o commit mais recente. O cargo deve
-estar no servidor de anúncios e ser mencionável pelo bot.
+commits disponíveis com o mesmo formato. Se não houver commits novos, o
+comando permite reenviar o commit mais recente.
 
 Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 `/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada

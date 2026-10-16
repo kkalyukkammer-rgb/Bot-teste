@@ -3792,7 +3792,11 @@ class BotDiscord(discord.Client):
             return
 
         head_commit, updates = pending
-        await self.publish_git_updates(head_commit, updates)
+        await self.publish_git_updates(
+            head_commit,
+            updates,
+            mention_role=True,
+        )
 
     async def publish_git_updates(
         self,
@@ -3827,12 +3831,18 @@ class BotDiscord(discord.Client):
             )
             return False
 
+        update_count = len(updates)
+        update_label = "atualização" if update_count == 1 else "atualizações"
         embed = discord.Embed(
-            title="Atualizações do bot",
-            description="\n".join(f"• {update}" for update in updates),
+            title="🎰 Novidades do Cassino",
+            description=(
+                f"O bot recebeu {update_count} {update_label}:\n\n"
+                + "\n".join(f"▫️ {update}" for update in updates)
+            ),
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
+        embed.set_footer(text="Atualização automática do bot")
         try:
             await channel.send(
                 content=(
