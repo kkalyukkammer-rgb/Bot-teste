@@ -29,6 +29,26 @@ ganhos/perdas acumulados, volume e quantidade de apostas, prestígio,
 upgrades e disponibilidade das recompensas. Quando usado em um servidor
 com cassino próprio, também inclui saldo, apostas e recompensas locais.
 
+As apostas vencedoras de NPCs nos cassinos de jogadores são dimensionadas
+para deixar pelo menos 1.000 moedas líquidas no caixa local, após a taxa
+devida à casa principal.
+
+O owner do bot pode usar `/resetar_dados_jogadores` para escolher entre
+zerar os saldos globais e locais dos jogadores ou liberar os cooldowns de
+recompensas globais e locais. O comando pede confirmação; os caixas dos
+cassinos e o histórico estatístico são preservados ao zerar saldos.
+A recompensa mensal global varia de 1.000 a 20.000 moedas.
+
+Qualquer apostador pode usar `/feedback` para enviar uma sugestão ou opinião
+diretamente por mensagem privada ao owner do bot. O bot confirma em uma
+resposta privada se a entrega foi concluída.
+
+Quando iniciar com novos commits Git, o bot publica os títulos desses commits
+no canal `1560451788254216343` do servidor `1467549007932030998`. Na primeira
+inicialização, registra o commit atual como referência sem publicar o
+histórico anterior. O processo precisa ter Git e o repositório disponível,
+além de permissão para enviar mensagens e embeds nesse canal.
+
 Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 `/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada
 compra, a mensagem oferece o próximo nível do mesmo upgrade para confirmação

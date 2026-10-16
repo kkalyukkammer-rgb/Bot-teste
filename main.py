@@ -5,7 +5,9 @@ import logging
 import math
 import os
 import random
+import re
 import sqlite3
+import subprocess
 import tempfile
 import time
 from typing import Literal
@@ -22,6 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger("discord_bot")
 
 BOT_OWNER_ID = 1079199747019112520
+UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
+UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
@@ -37,7 +41,7 @@ ECONOMY_DB_PATH = os.getenv(
 REWARD_SETTINGS = {
     "daily": ("daily_claim_at", 24 * 60 * 60, 1, 100, "diária"),
     "weekly": ("weekly_claim_at", 7 * 24 * 60 * 60, 100, 1000, "semanal"),
-    "monthly": ("monthly_claim_at", 30 * 24 * 60 * 60, 1000, 100000, "mensal"),
+    "monthly": ("monthly_claim_at", 30 * 24 * 60 * 60, 1000, 20000, "mensal"),
 }
 SLOT_SYMBOLS = ("🍒", "🍋", "🔔", "💎", "⭐", "7️⃣")
 SLOT_WEIGHTS = (35, 30, 18, 10, 5, 2)
@@ -75,11 +79,13 @@ ROULETTE_RED_NUMBERS = frozenset(
 DEFAULT_CASINO_CREATION_FEE = 1_000
 DEFAULT_CASINO_TAX_PERCENT = 10
 DEFAULT_MAIN_HOUSE_NPCS = 10
+MAIN_HOUSE_NPC_BET_MIN = 5_000
+MAIN_HOUSE_NPC_BET_MAX = 20_000
 CASINO_STARTING_NPCS = 3
 CASINO_MAX_NPCS = 100
 CASINO_NPC_HIRE_COST = 1_000
-CASINO_NPC_BET_MIN = 25
-CASINO_NPC_BET_MAX = 100
+CASINO_NPC_MIN_NET_EARNINGS = 1_000
+CASINO_NPC_BET_MAX_MULTIPLIER = 4
 NPC_ONLINE_INTERVAL_MIN_SECONDS = 15
 NPC_ONLINE_INTERVAL_MAX_SECONDS = 45
 NPC_OFFLINE_INTERVAL_SECONDS = 30 * 60
@@ -237,6 +243,14 @@ def initialize_economy() -> None:
             CREATE TABLE IF NOT EXISTS casino_settings (
                 setting TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_update_state (
+                setting TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
             """
         )
@@ -1226,8 +1240,21 @@ def main_house_upgrade_cost(level: int) -> int:
 
 def main_house_npc_bet_range(level: int) -> tuple[int, int]:
     return (
-        CASINO_NPC_BET_MIN * (level + 1),
-        CASINO_NPC_BET_MAX * (level + 1),
+        MAIN_HOUSE_NPC_BET_MIN * (level + 1),
+        MAIN_HOUSE_NPC_BET_MAX * (level + 1),
+    )
+
+
+def guild_casino_npc_bet_range(tax_percent: int) -> tuple[int, int]:
+    if not 0 <= tax_percent <= 50:
+        raise ValueError("A taxa do cassino precisa estar entre 0 e 50%.")
+    net_multiplier = 100 - tax_percent
+    minimum_bet = (
+        CASINO_NPC_MIN_NET_EARNINGS * 100 + net_multiplier - 1
+    ) // net_multiplier
+    return (
+        minimum_bet,
+        minimum_bet * CASINO_NPC_BET_MAX_MULTIPLIER,
     )
 
 
@@ -2223,8 +2250,20 @@ def run_npc_betting_cycle(
 
             treasury = progress["treasury"]
             level = progress["level"]
+            tax_percent = (
+                max(
+                    CASINO_MINIMUM_TAX_PERCENT,
+                    main_house_tax
+                    - level * CASINO_TAX_REDUCTION_PER_LEVEL,
+                )
+                if main_house_tax > 0
+                else 0
+            )
+            npc_bet_min, npc_bet_max = guild_casino_npc_bet_range(
+                tax_percent
+            )
             for _ in range(progress["npc_count"]):
-                bet = random.randint(CASINO_NPC_BET_MIN, CASINO_NPC_BET_MAX)
+                bet = random.randint(npc_bet_min, npc_bet_max)
                 house_change = bet if random.randint(1, 37) > 18 else -bet
                 if house_change > 0:
                     house_change = apply_positive_profit_bonus(
@@ -2238,15 +2277,6 @@ def run_npc_betting_cycle(
                     progress["house_lost"] += -house_change
                 else:
                     progress["house_earned"] += house_change
-                    tax_percent = (
-                        max(
-                            CASINO_MINIMUM_TAX_PERCENT,
-                            main_house_tax
-                            - level * CASINO_TAX_REDUCTION_PER_LEVEL,
-                        )
-                        if main_house_tax > 0
-                        else 0
-                    )
                     tax = (
                         (house_change * tax_percent + 99) // 100
                         if tax_percent > 0
@@ -2798,6 +2828,52 @@ def claim_reward(user_id: int, reward_type: str) -> tuple[bool, int, int]:
             (user_id,),
         ).fetchone()[0]
         return True, balance, reward
+
+
+def reset_player_data(reset_type: str) -> tuple[int, int]:
+    if reset_type not in {"balances", "reward_cooldowns"}:
+        raise ValueError(f"Tipo de reset inválido: {reset_type}")
+
+    with closing(
+        sqlite3.connect(ECONOMY_DB_PATH, timeout=10)
+    ) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if reset_type == "balances":
+            global_rows = connection.execute(
+                """
+                UPDATE economy_accounts SET balance = 0
+                WHERE user_id != ? AND balance != 0
+                """,
+                (BOT_OWNER_ID,),
+            ).rowcount
+            local_rows = connection.execute(
+                """
+                UPDATE guild_casino_accounts SET balance = 0
+                WHERE user_id != ? AND balance != 0
+                """,
+                (BOT_OWNER_ID,),
+            ).rowcount
+            return global_rows, local_rows
+
+        global_rows = connection.execute(
+            """
+            UPDATE economy_accounts
+            SET daily_claim_at = NULL,
+                weekly_claim_at = NULL,
+                monthly_claim_at = NULL
+            WHERE daily_claim_at IS NOT NULL
+               OR weekly_claim_at IS NOT NULL
+               OR monthly_claim_at IS NOT NULL
+            """
+        ).rowcount
+        local_rows = connection.execute(
+            """
+            UPDATE guild_casino_accounts
+            SET daily_claim_at = NULL, weekly_claim_at = NULL
+            WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL
+            """
+        ).rowcount
+        return global_rows, local_rows
 
 
 def format_remaining(seconds: int) -> str:
@@ -3533,6 +3609,108 @@ def render_slot_gif(reels: list[str], payout: int, multiplier: int) -> io.BytesI
 initialize_economy()
 
 
+def get_last_announced_commit() -> str | None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        state = connection.execute(
+            """
+            SELECT value FROM bot_update_state
+            WHERE setting = 'last_announced_commit'
+            """
+        ).fetchone()
+    return state[0] if state is not None else None
+
+
+def set_last_announced_commit(commit_hash: str) -> None:
+    with closing(
+        sqlite3.connect(ECONOMY_DB_PATH, timeout=10)
+    ) as connection, connection:
+        connection.execute(
+            """
+            INSERT INTO bot_update_state (setting, value)
+            VALUES ('last_announced_commit', ?)
+            ON CONFLICT(setting) DO UPDATE SET value = excluded.value
+            """,
+            (commit_hash,),
+        )
+
+
+def get_git_update_info(
+    previous_commit: str | None,
+) -> tuple[str, list[str]] | None:
+    try:
+        head_result = subprocess.run(
+            ["git", "-C", PROJECT_DIRECTORY, "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("Não foi possível consultar o commit atual do bot.")
+        return None
+
+    if head_result.returncode != 0:
+        logger.error(
+            "O repositório Git do bot não retornou HEAD: %s",
+            head_result.stderr.strip(),
+        )
+        return None
+    head_commit = head_result.stdout.strip()
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", head_commit) is None:
+        logger.error("O repositório Git retornou um hash HEAD inválido.")
+        return None
+    if previous_commit is None or previous_commit == head_commit:
+        return head_commit, []
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", previous_commit) is None:
+        logger.error("O hash do último commit anunciado está inválido.")
+        return None
+
+    try:
+        log_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                PROJECT_DIRECTORY,
+                "log",
+                "--format=%h%x09%s",
+                "--max-count=11",
+                f"{previous_commit}..{head_commit}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("Não foi possível ler os commits novos do bot.")
+        return None
+
+    if log_result.returncode != 0:
+        logger.error(
+            "Não foi possível listar os commits novos do bot: %s",
+            log_result.stderr.strip(),
+        )
+        return None
+    updates = [
+        f"`{commit_hash}` — {subject[:250]}"
+        for line in log_result.stdout.splitlines()
+        if "\t" in line
+        for commit_hash, subject in [line.split("\t", 1)]
+    ]
+    if not updates:
+        logger.error(
+            "O commit atual mudou, mas não há commits novos no histórico "
+            "desde o último anúncio."
+        )
+        return None
+    if len(updates) > 10:
+        updates = updates[:10]
+        updates.append(
+            "Há mais atualizações; foram listados os 10 commits mais recentes."
+        )
+    return head_commit, updates
+
+
 class BotDiscord(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -3543,10 +3721,32 @@ class BotDiscord(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.house_owner_id: int | None = None
         self.npc_betting_task: asyncio.Task[None] | None = None
+        self.pending_update_announcement: tuple[str, list[str]] | None = None
 
     async def setup_hook(self) -> None:
         self.house_owner_id = BOT_OWNER_ID
         set_house_owner_id(self.house_owner_id)
+
+        try:
+            previous_commit = get_last_announced_commit()
+        except sqlite3.Error:
+            logger.exception(
+                "Não foi possível carregar o estado dos anúncios de atualização."
+            )
+            previous_commit = None
+        update_info = get_git_update_info(previous_commit)
+        if update_info is not None:
+            head_commit, updates = update_info
+            if previous_commit is None:
+                try:
+                    set_last_announced_commit(head_commit)
+                except sqlite3.Error:
+                    logger.exception(
+                        "Não foi possível inicializar o estado dos anúncios "
+                        "de atualização."
+                    )
+            elif updates:
+                self.pending_update_announcement = (head_commit, updates)
 
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
@@ -3566,11 +3766,73 @@ class BotDiscord(discord.Client):
     async def on_ready(self) -> None:
         if self.user is not None:
             logger.info("Bot conectado como %s (%s).", self.user, self.user.id)
+        await self.announce_git_updates()
         if self.npc_betting_task is None or self.npc_betting_task.done():
             self.npc_betting_task = asyncio.create_task(
                 self.npc_betting_loop(),
                 name="npc-betting-loop",
             )
+
+    async def announce_git_updates(self) -> None:
+        pending = self.pending_update_announcement
+        if pending is None:
+            return
+
+        head_commit, updates = pending
+        channel = self.get_channel(UPDATE_ANNOUNCEMENT_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(
+                    UPDATE_ANNOUNCEMENT_CHANNEL_ID
+                )
+            except discord.HTTPException as error:
+                logger.error(
+                    "Não foi possível localizar o canal de anúncios %s.",
+                    UPDATE_ANNOUNCEMENT_CHANNEL_ID,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                return
+
+        channel_guild = getattr(channel, "guild", None)
+        if (
+            channel_guild is None
+            or channel_guild.id != UPDATE_ANNOUNCEMENT_GUILD_ID
+        ):
+            logger.error(
+                "O canal de anúncios %s não pertence ao servidor configurado %s.",
+                UPDATE_ANNOUNCEMENT_CHANNEL_ID,
+                UPDATE_ANNOUNCEMENT_GUILD_ID,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Atualizações do bot",
+            description="\n".join(f"• {update}" for update in updates),
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        try:
+            await channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as error:
+            logger.error(
+                "Não foi possível publicar as atualizações no canal %s.",
+                UPDATE_ANNOUNCEMENT_CHANNEL_ID,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            return
+
+        try:
+            set_last_announced_commit(head_commit)
+        except sqlite3.Error:
+            logger.exception(
+                "As atualizações foram publicadas, mas o commit anunciado "
+                "não pôde ser salvo."
+            )
+            return
+        self.pending_update_announcement = None
 
     async def npc_betting_loop(self) -> None:
         while not self.is_closed():
@@ -4245,6 +4507,113 @@ async def saldo(interaction: discord.Interaction) -> None:
     balance = get_balance(interaction.user.id)
     await interaction.response.send_message(
         f"{interaction.user.mention}, seu saldo é de {balance} moedas.",
+        ephemeral=True,
+    )
+
+
+class PlayerDataResetView(discord.ui.View):
+    def __init__(self, owner_id: int, reset_type: str) -> None:
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.reset_type = reset_type
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id == BOT_OWNER_ID:
+            return True
+        await interaction.response.send_message(
+            "Somente o owner do bot pode confirmar este reset.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Confirmar reset",
+        emoji="⚠️",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        global_rows, local_rows = reset_player_data(self.reset_type)
+        if self.reset_type == "balances":
+            message = (
+                "✅ Saldos dos jogadores zerados: "
+                f"**{global_rows}** contas globais e **{local_rows}** contas "
+                "de cassinos locais. O saldo da casa principal, os caixas "
+                "dos cassinos e o histórico estatístico foram preservados."
+            )
+        else:
+            message = (
+                "✅ Cooldowns das recompensas foram liberados para todos: "
+                f"**{global_rows}** contas globais e **{local_rows}** contas "
+                "de cassinos locais. Os cooldowns de apostas em animais e "
+                "todo o histórico foram preservados."
+            )
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content=message,
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="✖️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Reset cancelado; nenhum dado foi alterado.",
+            view=None,
+        )
+
+
+@bot.tree.command(
+    name="resetar_dados_jogadores",
+    description="Reseta saldos ou cooldowns de recompensas dos jogadores.",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.choices(
+    tipo=[
+        app_commands.Choice(name="Zerar saldos dos jogadores", value="balances"),
+        app_commands.Choice(
+            name="Liberar cooldowns das recompensas",
+            value="reward_cooldowns",
+        ),
+    ]
+)
+async def resetar_dados_jogadores(
+    interaction: discord.Interaction,
+    tipo: app_commands.Choice[str],
+) -> None:
+    if tipo.value == "balances":
+        description = (
+            "Isso zerará os saldos globais e os saldos locais dos jogadores "
+            "em todos os cassinos. O saldo da casa principal, os caixas dos "
+            "cassinos e o histórico estatístico não serão alterados."
+        )
+    else:
+        description = (
+            "Isso liberará os cooldowns de daily, weekly e monthly globais, "
+            "além de daily e weekly dos cassinos locais, para todos os "
+            "jogadores. Cooldowns de apostas em animais não serão alterados."
+        )
+    embed = discord.Embed(
+        title="Confirmar reset de dados dos jogadores",
+        description=description,
+        color=discord.Color.red(),
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=PlayerDataResetView(interaction.user.id, tipo.value),
         ephemeral=True,
     )
 
@@ -5210,6 +5579,94 @@ async def solicitar_jogo_cassino(
 
     await interaction.followup.send(
         "Seu pedido de jogo foi enviado por DM ao dono do bot.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="feedback",
+    description="Envia uma sugestão ou feedback do cassino ao dono do bot.",
+)
+@app_commands.describe(
+    mensagem="Escreva seu feedback ou sugestão (10 a 1500 caracteres).",
+)
+async def feedback(
+    interaction: discord.Interaction,
+    mensagem: app_commands.Range[str, 10, 1500],
+) -> None:
+    cleaned_message = mensagem.strip()
+    if len(cleaned_message) < 10:
+        await interaction.response.send_message(
+            "Escreva pelo menos 10 caracteres de feedback, sem contar espaços.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    house_owner_id = get_house_owner_id()
+    owner = bot.get_user(house_owner_id)
+    if owner is None:
+        try:
+            owner = await bot.fetch_user(house_owner_id)
+        except discord.HTTPException as error:
+            logger.error(
+                "Não foi possível localizar o dono do bot para encaminhar feedback.",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            await interaction.followup.send(
+                "Não foi possível localizar o dono do bot para entregar seu feedback.",
+                ephemeral=True,
+            )
+            return
+
+    embed = discord.Embed(
+        title="Feedback do cassino",
+        description=cleaned_message,
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="Apostador",
+        value=(
+            f"**{interaction.user.display_name}** "
+            f"({interaction.user.mention}) (`{interaction.user.id}`)"
+        ),
+        inline=False,
+    )
+    if interaction.guild is not None:
+        embed.add_field(
+            name="Servidor",
+            value=f"{interaction.guild.name} (`{interaction.guild.id}`)",
+            inline=False,
+        )
+
+    try:
+        await owner.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "Não consegui entregar o feedback por mensagem direta. "
+            "Peça ao dono do bot para permitir DMs do bot e tente novamente.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as error:
+        logger.error(
+            "Falha ao enviar feedback por DM do apostador %s.",
+            interaction.user.id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await interaction.followup.send(
+            "Ocorreu um erro ao enviar seu feedback por DM. "
+            "Tente novamente mais tarde.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        "Seu feedback foi enviado por DM ao dono do bot.",
         ephemeral=True,
     )
 
