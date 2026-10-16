@@ -5,9 +5,7 @@ import logging
 import math
 import os
 import random
-import re
 import sqlite3
-import subprocess
 import tempfile
 import time
 from typing import Literal
@@ -27,6 +25,10 @@ BOT_OWNER_ID = 1079199747019112520
 UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
+UPDATE_ANNOUNCEMENT_MESSAGE = (
+    "UPDATE mais income para donos de cassino, reduzido o reward do monthly "
+    "reward de 100k- para 20k (redução de 80%)"
+)
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
@@ -3610,115 +3612,29 @@ def render_slot_gif(reels: list[str], payout: int, multiplier: int) -> io.BytesI
 initialize_economy()
 
 
-def get_last_announced_commit() -> str | None:
+def get_last_announced_update() -> str | None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         state = connection.execute(
             """
             SELECT value FROM bot_update_state
-            WHERE setting = 'last_announced_commit'
+            WHERE setting = 'last_announced_update'
             """
         ).fetchone()
     return state[0] if state is not None else None
 
 
-def set_last_announced_commit(commit_hash: str) -> None:
+def set_last_announced_update(message: str) -> None:
     with closing(
         sqlite3.connect(ECONOMY_DB_PATH, timeout=10)
     ) as connection, connection:
         connection.execute(
             """
             INSERT INTO bot_update_state (setting, value)
-            VALUES ('last_announced_commit', ?)
+            VALUES ('last_announced_update', ?)
             ON CONFLICT(setting) DO UPDATE SET value = excluded.value
             """,
-            (commit_hash,),
+            (message,),
         )
-
-
-def get_git_update_info(
-    previous_commit: str | None,
-) -> tuple[str, list[str]] | None:
-    try:
-        head_result = subprocess.run(
-            ["git", "-C", PROJECT_DIRECTORY, "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        logger.exception("Não foi possível consultar o commit atual do bot.")
-        return None
-
-    if head_result.returncode != 0:
-        logger.error(
-            "O repositório Git do bot não retornou HEAD: %s",
-            head_result.stderr.strip(),
-        )
-        return None
-    head_commit = head_result.stdout.strip()
-    if re.fullmatch(r"[0-9a-fA-F]{40,64}", head_commit) is None:
-        logger.error("O repositório Git retornou um hash HEAD inválido.")
-        return None
-    if previous_commit == head_commit:
-        return head_commit, []
-    if previous_commit is not None and re.fullmatch(
-        r"[0-9a-fA-F]{40,64}",
-        previous_commit,
-    ) is None:
-        logger.error("O hash do último commit anunciado está inválido.")
-        return None
-
-    revision_range = (
-        [head_commit]
-        if previous_commit is None
-        else [f"{previous_commit}..{head_commit}"]
-    )
-    max_commits = "1" if previous_commit is None else "11"
-    try:
-        log_result = subprocess.run(
-            [
-                "git",
-                "-C",
-                PROJECT_DIRECTORY,
-                "log",
-                "--format=%h%x09%s",
-                f"--max-count={max_commits}",
-                *revision_range,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        logger.exception("Não foi possível ler os commits novos do bot.")
-        return None
-
-    if log_result.returncode != 0:
-        logger.error(
-            "Não foi possível listar os commits novos do bot: %s",
-            log_result.stderr.strip(),
-        )
-        return None
-    updates = [
-        f"`{commit_hash}` — {subject[:250]}"
-        for line in log_result.stdout.splitlines()
-        if "\t" in line
-        for commit_hash, subject in [line.split("\t", 1)]
-    ]
-    if not updates:
-        logger.error(
-            "O commit atual mudou, mas não há commits novos no histórico "
-            "desde o último anúncio."
-        )
-        return None
-    if len(updates) > 10:
-        updates = updates[:10]
-        updates.append(
-            "Há mais atualizações; foram listados os 10 commits mais recentes."
-        )
-    return head_commit, updates
 
 
 class BotDiscord(discord.Client):
@@ -3731,35 +3647,21 @@ class BotDiscord(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.house_owner_id: int | None = None
         self.npc_betting_task: asyncio.Task[None] | None = None
-        self.pending_update_announcement: tuple[str, list[str]] | None = None
+        self.pending_update_announcement: str | None = None
 
     async def setup_hook(self) -> None:
         self.house_owner_id = BOT_OWNER_ID
         set_house_owner_id(self.house_owner_id)
 
         try:
-            previous_commit = get_last_announced_commit()
+            previous_update = get_last_announced_update()
         except sqlite3.Error:
             logger.exception(
                 "Não foi possível carregar o estado dos anúncios de atualização."
             )
-            previous_commit = None
-        update_info = get_git_update_info(previous_commit)
-        if update_info is not None:
-            head_commit, updates = update_info
-            if previous_commit is None:
-                if updates:
-                    self.pending_update_announcement = (head_commit, updates)
-                else:
-                    try:
-                        set_last_announced_commit(head_commit)
-                    except sqlite3.Error:
-                        logger.exception(
-                            "Não foi possível inicializar o estado dos anúncios "
-                            "de atualização."
-                        )
-            elif updates:
-                self.pending_update_announcement = (head_commit, updates)
+            previous_update = None
+        if previous_update != UPDATE_ANNOUNCEMENT_MESSAGE:
+            self.pending_update_announcement = UPDATE_ANNOUNCEMENT_MESSAGE
 
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
@@ -3779,29 +3681,26 @@ class BotDiscord(discord.Client):
     async def on_ready(self) -> None:
         if self.user is not None:
             logger.info("Bot conectado como %s (%s).", self.user, self.user.id)
-        await self.announce_git_updates()
+        if self.pending_update_announcement is not None:
+            await self.announce_update(self.pending_update_announcement)
         if self.npc_betting_task is None or self.npc_betting_task.done():
             self.npc_betting_task = asyncio.create_task(
                 self.npc_betting_loop(),
                 name="npc-betting-loop",
             )
 
-    async def announce_git_updates(self) -> None:
-        pending = self.pending_update_announcement
-        if pending is None:
-            return
-
-        head_commit, updates = pending
-        await self.publish_git_updates(
-            head_commit,
-            updates,
+    async def announce_update(self, message: str) -> bool:
+        published = await self.publish_update_message(
+            message,
             mention_role=True,
         )
+        if published and self.pending_update_announcement == message:
+            self.pending_update_announcement = None
+        return published
 
-    async def publish_git_updates(
+    async def publish_update_message(
         self,
-        head_commit: str,
-        updates: list[str],
+        message: str,
         *,
         mention_role: bool = False,
     ) -> bool:
@@ -3831,14 +3730,9 @@ class BotDiscord(discord.Client):
             )
             return False
 
-        update_count = len(updates)
-        update_label = "atualização" if update_count == 1 else "atualizações"
         embed = discord.Embed(
             title="🎰 Novidades do Cassino",
-            description=(
-                f"O bot recebeu {update_count} {update_label}:\n\n"
-                + "\n".join(f"▫️ {update}" for update in updates)
-            ),
+            description=message,
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
@@ -3870,15 +3764,12 @@ class BotDiscord(discord.Client):
             return False
 
         try:
-            set_last_announced_commit(head_commit)
+            set_last_announced_update(message)
         except sqlite3.Error:
             logger.exception(
-                "As atualizações foram publicadas, mas o commit anunciado "
-                "não pôde ser salvo."
+                "A atualização foi publicada, mas seu estado não pôde ser salvo."
             )
             return False
-        if self.pending_update_announcement == (head_commit, updates):
-            self.pending_update_announcement = None
         return True
 
     async def npc_betting_loop(self) -> None:
@@ -7183,43 +7074,10 @@ async def ajuda(interaction: discord.Interaction) -> None:
 @app_commands.check(is_bot_owner)
 async def anunciar_update(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-
-    try:
-        previous_commit = get_last_announced_commit()
-    except sqlite3.Error:
-        logger.exception(
-            "Não foi possível carregar o estado dos anúncios de atualização."
-        )
-        await interaction.followup.send(
-            "Não foi possível consultar o histórico de anúncios. Confira os logs.",
-            ephemeral=True,
-        )
-        return
-
-    update_info = get_git_update_info(previous_commit)
-    if update_info is None:
-        await interaction.followup.send(
-            "Não consegui ler os commits do repositório. Confira os logs do bot.",
-            ephemeral=True,
-        )
-        return
-    if not update_info[1]:
-        update_info = get_git_update_info(None)
-    if update_info is None or not update_info[1]:
-        await interaction.followup.send(
-            "Não há commits disponíveis para publicar como atualização.",
-            ephemeral=True,
-        )
-        return
-
-    published = await bot.publish_git_updates(
-        *update_info,
-        mention_role=True,
-    )
+    published = await bot.announce_update(UPDATE_ANNOUNCEMENT_MESSAGE)
     if not published:
         await interaction.followup.send(
-            "Não foi possível confirmar a publicação. Confira o canal e os logs; "
-            "se a mensagem chegou, o estado do anúncio pode não ter sido salvo.",
+            "Não foi possível publicar a atualização. Confira o canal e os logs.",
             ephemeral=True,
         )
         return
