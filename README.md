@@ -44,10 +44,10 @@ diretamente por mensagem privada ao owner do bot. O bot confirma em uma
 resposta privada se a entrega foi concluída.
 
 Quando iniciar com novos commits Git, o bot publica os títulos desses commits
-no canal `1560451788254216343` do servidor `1467549007932030998`. Na primeira
-inicialização, registra o commit atual como referência sem publicar o
-histórico anterior. O processo precisa ter Git e o repositório disponível,
-além de permissão para enviar mensagens e embeds nesse canal.
+no canal `1560451788254216343` do servidor `1467549007932030998`. Se ainda não
+houver um commit anunciado salvo, publica somente o commit mais recente para
+evitar enviar o histórico inteiro. O processo precisa ter Git e o repositório
+disponível, além de permissão para enviar mensagens e embeds nesse canal.
 
 Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 `/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada

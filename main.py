@@ -3659,12 +3659,21 @@ def get_git_update_info(
     if re.fullmatch(r"[0-9a-fA-F]{40,64}", head_commit) is None:
         logger.error("O repositório Git retornou um hash HEAD inválido.")
         return None
-    if previous_commit is None or previous_commit == head_commit:
+    if previous_commit == head_commit:
         return head_commit, []
-    if re.fullmatch(r"[0-9a-fA-F]{40,64}", previous_commit) is None:
+    if previous_commit is not None and re.fullmatch(
+        r"[0-9a-fA-F]{40,64}",
+        previous_commit,
+    ) is None:
         logger.error("O hash do último commit anunciado está inválido.")
         return None
 
+    revision_range = (
+        [head_commit]
+        if previous_commit is None
+        else [f"{previous_commit}..{head_commit}"]
+    )
+    max_commits = "1" if previous_commit is None else "11"
     try:
         log_result = subprocess.run(
             [
@@ -3673,8 +3682,8 @@ def get_git_update_info(
                 PROJECT_DIRECTORY,
                 "log",
                 "--format=%h%x09%s",
-                "--max-count=11",
-                f"{previous_commit}..{head_commit}",
+                f"--max-count={max_commits}",
+                *revision_range,
             ],
             capture_output=True,
             text=True,
@@ -3738,13 +3747,16 @@ class BotDiscord(discord.Client):
         if update_info is not None:
             head_commit, updates = update_info
             if previous_commit is None:
-                try:
-                    set_last_announced_commit(head_commit)
-                except sqlite3.Error:
-                    logger.exception(
-                        "Não foi possível inicializar o estado dos anúncios "
-                        "de atualização."
-                    )
+                if updates:
+                    self.pending_update_announcement = (head_commit, updates)
+                else:
+                    try:
+                        set_last_announced_commit(head_commit)
+                    except sqlite3.Error:
+                        logger.exception(
+                            "Não foi possível inicializar o estado dos anúncios "
+                            "de atualização."
+                        )
             elif updates:
                 self.pending_update_announcement = (head_commit, updates)
 
