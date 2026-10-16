@@ -33,6 +33,22 @@ As apostas vencedoras de NPCs nos cassinos de jogadores são dimensionadas
 para deixar pelo menos 1.000 moedas líquidas no caixa local, após a taxa
 devida à casa principal.
 
+## Trabalho, roubo e apostas
+
+`/workshift` paga o salário do trabalho atual por um período aleatório de
+30 minutos a 8 horas. O limite acumulado é de 8 horas a cada 24 horas. Use
+`/mudar_trabalho` para escolher uma profissão; cada uma tem taxa de inscrição
+e salário por hora próprios. Donos de cassino não podem trocar de trabalho.
+
+`/roubar` tem 65% de chance de sucesso. Uma tentativa bem-sucedida consome uma
+das 5 tentativas disponíveis; uma tentativa fracassada consome todas. Quando
+as tentativas acabam, a recuperação completa acontece após 24 horas.
+
+Os resultados das apostas oferecem um botão para repetir na mesma mensagem
+com o mesmo valor e escolha. Em desafios entre jogadores, o botão reinicia o
+desafio para os mesmos participantes. Valores monetários usam ponto como
+separador de milhares.
+
 O owner do bot pode usar `/resetar_dados_jogadores` para escolher entre
 zerar os saldos globais e locais dos jogadores ou liberar os cooldowns de
 recompensas globais e locais. O comando pede confirmação; os caixas dos
@@ -47,8 +63,11 @@ Ao iniciar, o bot publica no canal `1560451788254216343` do servidor
 `1467549007932030998` o texto de atualização definido em
 `UPDATE_ANNOUNCEMENT_MESSAGE` no código e menciona o cargo
 `1559362476921987072`. O texto é enviado automaticamente quando muda e seu
-envio fica registrado no banco, sem consultar commits Git. O owner também pode
-usar `/anunciar_update` para reenviar manualmente a mensagem atual. O bot
+envio fica registrado no banco, sem consultar commits Git. Ao preparar uma
+atualização, ajuste esse texto para resumir as funcionalidades alteradas; esta
+versão anuncia os novos comandos de trabalho e roubo e os botões de repetição
+das apostas. O owner também pode usar `/anunciar_update` para reenviar
+manualmente a mensagem atual. O bot
 precisa ter permissão para enviar mensagens e embeds; o cargo deve existir no
 servidor e ser mencionável pelo bot.
 

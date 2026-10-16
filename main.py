@@ -26,8 +26,10 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "UPDATE mais income para donos de cassino, reduzido o reward do monthly "
-    "reward de 100k- para 20k (redução de 80%)"
+    "Novidades: comandos /workshift e /mudar_trabalho com limite diário de "
+    "8 horas e empregos com salários e custos próprios; /roubar com até "
+    "5 tentativas e recuperação após 24 horas quando esgotadas; apostas com "
+    "botão para jogar novamente na mesma mensagem; interfaces mais interativas."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
@@ -135,6 +137,9 @@ CASINO_ROLE_REFRESH_COMMANDS = CASINO_PARTICIPANT_COMMANDS | frozenset(
         "daily_cassino",
         "weekly_cassino",
         "criar_cassino",
+        "mudar_trabalho",
+        "workshift",
+        "roubar",
         "prestigio",
         "upgrade_prestigio",
     }
@@ -162,6 +167,19 @@ AUTOROLE_CONDITIONS = {
     "prestige": "nível mínimo de prestígio",
     "bet_volume": "volume total apostado",
     "bet_count": "quantidade de apostas",
+}
+WORK_DAY_SECONDS = 24 * 60 * 60
+WORK_LIMIT_SECONDS = 8 * 60 * 60
+WORK_INTERVAL_SECONDS = 30 * 60
+ROBBERY_MAX_ATTEMPTS = 5
+ROBBERY_RECOVERY_SECONDS = 24 * 60 * 60
+ROBBERY_SUCCESS_CHANCE = 0.65
+JOBS = {
+    "desempregado": ("Bico", 0, 2_000),
+    "entregador": ("Entregador", 5_000, 5_000),
+    "seguranca": ("Segurança", 20_000, 8_000),
+    "programador": ("Programador", 75_000, 12_000),
+    "influenciador": ("Influenciador", 200_000, 18_000),
 }
 
 
@@ -201,7 +219,12 @@ def initialize_economy() -> None:
                 daily_claim_at INTEGER,
                 weekly_claim_at INTEGER,
                 monthly_claim_at INTEGER,
-                animal_bet_at INTEGER
+                animal_bet_at INTEGER,
+                job TEXT NOT NULL DEFAULT 'desempregado',
+                work_used_seconds INTEGER NOT NULL DEFAULT 0,
+                work_started_at INTEGER,
+                robbery_attempts INTEGER NOT NULL DEFAULT 5,
+                robbery_recover_at INTEGER
             )
             """
         )
@@ -473,6 +496,19 @@ def initialize_economy() -> None:
                 connection.execute(
                     "ALTER TABLE economy_accounts "
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}"
+                )
+        account_column_migrations = {
+            "job": "TEXT NOT NULL DEFAULT 'desempregado'",
+            "work_used_seconds": "INTEGER NOT NULL DEFAULT 0",
+            "work_started_at": "INTEGER",
+            "robbery_attempts": f"INTEGER NOT NULL DEFAULT {ROBBERY_MAX_ATTEMPTS}",
+            "robbery_recover_at": "INTEGER",
+        }
+        for column, declaration in account_column_migrations.items():
+            if column not in columns:
+                connection.execute(
+                    "ALTER TABLE economy_accounts "
+                    f"ADD COLUMN {column} {declaration}"
                 )
 
         guild_account_columns = {
@@ -1406,6 +1442,10 @@ async def send_bet_result(
     result: str,
     payout: int,
     balance: int,
+    view: discord.ui.View | None = None,
+    edit_message: bool = False,
+    file: discord.File | None = None,
+    image_url: str | None = None,
 ) -> None:
     net_change = payout - bet if payout else -bet
     net_sign = "+" if net_change > 0 else ""
@@ -1432,7 +1472,182 @@ async def send_bet_result(
         inline=True,
     )
     embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
-    await interaction.response.send_message(embed=embed)
+    if image_url is not None:
+        embed.set_image(url=image_url)
+
+    if edit_message:
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+            attachments=[file] if file is not None else [],
+        )
+    else:
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            file=file,
+        )
+
+
+class BetAgainView(discord.ui.View):
+    def __init__(
+        self,
+        user_id: int,
+        game: str,
+        bet: int,
+        choice: str | tuple[str, ...],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.game = game
+        self.bet = bet
+        self.choice = choice
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Somente quem fez a aposta pode apostar novamente.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Apostar novamente",
+        emoji="🔁",
+        style=discord.ButtonStyle.primary,
+    )
+    async def repeat(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await repeat_bet(interaction, self.game, self.bet, self.choice)
+
+
+async def repeat_bet(
+    interaction: discord.Interaction,
+    game: str,
+    bet: int,
+    choice: str | tuple[str, ...],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, bet):
+        return
+
+    payout = 0
+    result = ""
+    file = None
+    image_url = None
+    choice_text = ""
+    if game == "moeda":
+        result_value = random.choice(("cara", "coroa"))
+        assert isinstance(choice, str)
+        payout = bet * 2 if choice == result_value else 0
+        choice_text = f"Você escolheu **{choice.capitalize()}**."
+        result = f"A moeda caiu em **{result_value.capitalize()}**."
+    elif game == "dados":
+        roll = random.randint(1, 6)
+        assert isinstance(choice, str)
+        if choice in ("par", "ímpar"):
+            won = ("par" if roll % 2 == 0 else "ímpar") == choice
+            multiplier = 2
+        else:
+            won = roll == int(choice)
+            multiplier = 5
+        payout = bet * multiplier if won else 0
+        choice_text = f"Você escolheu **{choice.capitalize()}**."
+        result = f"O dado caiu em **{roll}**."
+    elif game == "roleta":
+        number = random.randint(0, 36)
+        result_color = (
+            "verde"
+            if number == 0
+            else "vermelho"
+            if number in ROULETTE_RED_NUMBERS
+            else "preto"
+        )
+        assert isinstance(choice, str)
+        payout = bet * (36 if choice == "verde" else 2) if choice == result_color else 0
+        choice_text = f"Você apostou em **{choice.capitalize()}**."
+        result = f"A roleta parou no **{number} {result_color}**."
+    elif game == "corrida":
+        assert isinstance(choice, tuple)
+        drawn_animal = random.choice(BETTING_ANIMALS)
+        payout, multiplier = animal_bet_payout(choice, drawn_animal, bet)
+        choice_text = "Você escolheu **" + " | ".join(choice) + "**."
+        result = (
+            f"O animal sorteado foi **{drawn_animal}** "
+            f"(multiplicador x{multiplier:g})."
+        )
+    elif game == "cacaniquel":
+        reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+        payout, combination, multiplier = slot_payout(reels, bet)
+        choice_text = "Giro da máquina caça-níquel."
+        result = (
+            f"Resultado: **{' | '.join(reels)}** — {combination} "
+            f"(multiplicador x{multiplier})."
+        )
+        animation = await asyncio.to_thread(render_slot_gif, reels, payout, multiplier)
+        file = discord.File(animation, filename="cacaniquel.gif")
+        image_url = "attachment://cacaniquel.gif"
+    else:
+        raise ValueError(f"Jogo de repetição desconhecido: {game}")
+
+    payout = adjust_player_bet_payout(interaction.user.id, bet, payout)
+    if game == "corrida":
+        bet_status, balance, remaining = settle_animal_house_bet(
+            interaction.user.id,
+            get_house_owner_id(),
+            bet,
+            payout,
+        )
+        if bet_status == "cooldown":
+            await interaction.response.send_message(
+                "Você já apostou no sorteio de animais hoje. "
+                f"Tente novamente em {format_remaining(remaining)}.",
+                ephemeral=True,
+            )
+            return
+        if bet_status != "accepted":
+            await interaction.response.send_message(
+                "A aposta foi cancelada: saldo insuficiente ou banca "
+                "principal sem fundos para cobrir esse resultado.",
+                ephemeral=True,
+            )
+            return
+    else:
+        settled, balance, _ = settle_house_bet(
+            interaction.user.id,
+            get_house_owner_id(),
+            bet,
+            payout,
+        )
+        if not settled:
+            await interaction.response.send_message(
+                "A aposta foi cancelada: saldo insuficiente ou banca "
+                "principal sem fundos para cobrir esse resultado. "
+                f"Seu saldo continua em {format_coins(balance)} moedas.",
+                ephemeral=True,
+            )
+            return
+
+    await send_bet_result(
+        interaction,
+        game=game.upper(),
+        bet=bet,
+        choice=choice_text,
+        result=result,
+        payout=payout,
+        balance=balance,
+        view=BetAgainView(interaction.user.id, game, bet, choice),
+        edit_message=True,
+        file=file,
+        image_url=image_url,
+    )
 
 
 def get_leaderboard(user_ids: list[int]) -> list[tuple[int, int, int, int]]:
@@ -1503,6 +1718,175 @@ def change_balance(user_id: int, amount: int) -> tuple[bool, int]:
             (user_id,),
         ).fetchone()[0]
         return True, balance
+
+
+def change_player_job(user_id: int, job_key: str) -> tuple[str, int]:
+    if job_key not in JOBS:
+        raise ValueError("Trabalho desconhecido.")
+
+    application_cost = JOBS[job_key][1]
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        if connection.execute(
+            "SELECT 1 FROM guild_casinos WHERE owner_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone() is not None:
+            balance = connection.execute(
+                "SELECT balance FROM economy_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0]
+            return "casino_owner", balance
+
+        balance, current_job = connection.execute(
+            "SELECT balance, job FROM economy_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if current_job == job_key:
+            return "same_job", balance
+        if balance < application_cost:
+            return "insufficient", balance
+
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?, job = ?
+            WHERE user_id = ?
+            """,
+            (application_cost, application_cost, job_key, user_id),
+        )
+        return "changed", balance - application_cost
+
+
+def work_player_shift(
+    user_id: int,
+) -> tuple[str, str, int, int, int, int, int]:
+    now = int(time.time())
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        balance, job_key, work_used, work_started_at = connection.execute(
+            """
+            SELECT balance, job, work_used_seconds, work_started_at
+            FROM economy_accounts WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if job_key not in JOBS:
+            raise ValueError(f"Trabalho inválido salvo para o usuário {user_id}.")
+
+        if work_started_at is None or now - work_started_at >= WORK_DAY_SECONDS:
+            work_used = 0
+            work_started_at = now
+
+        remaining = max(0, WORK_LIMIT_SECONDS - work_used)
+        if remaining == 0:
+            return (
+                "limit",
+                job_key,
+                0,
+                0,
+                balance,
+                remaining,
+                work_started_at + WORK_DAY_SECONDS,
+            )
+
+        intervals = max(1, remaining // WORK_INTERVAL_SECONDS)
+        duration = random.randint(1, intervals) * WORK_INTERVAL_SECONDS
+        payout = JOBS[job_key][2] * duration // (60 * 60)
+        remaining -= duration
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance + ?, total_earned = total_earned + ?,
+                work_used_seconds = ?, work_started_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                payout,
+                payout,
+                WORK_LIMIT_SECONDS - remaining,
+                work_started_at,
+                user_id,
+            ),
+        )
+        return (
+            "worked",
+            job_key,
+            duration,
+            payout,
+            balance + payout,
+            remaining,
+            work_started_at + WORK_DAY_SECONDS,
+        )
+
+
+def attempt_robbery(
+    user_id: int,
+) -> tuple[str, int, int, int, int | None]:
+    now = int(time.time())
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
+            (user_id,),
+        )
+        balance, attempts, recover_at = connection.execute(
+            """
+            SELECT balance, robbery_attempts, robbery_recover_at
+            FROM economy_accounts WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        if attempts == 0 and recover_at is not None and now < recover_at:
+            return "cooldown", balance, attempts, 0, recover_at
+        if attempts == 0:
+            attempts = ROBBERY_MAX_ATTEMPTS
+            recover_at = None
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET robbery_attempts = ?, robbery_recover_at = NULL
+                WHERE user_id = ?
+                """,
+                (attempts, user_id),
+            )
+
+        if random.random() < ROBBERY_SUCCESS_CHANCE:
+            won_amount = random.randint(1_000, 10_000)
+            attempts -= 1
+            recover_at = now + ROBBERY_RECOVERY_SECONDS if attempts == 0 else None
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?,
+                    robbery_attempts = ?, robbery_recover_at = ?
+                WHERE user_id = ?
+                """,
+                (won_amount, won_amount, attempts, recover_at, user_id),
+            )
+            return "success", balance + won_amount, attempts, won_amount, recover_at
+
+        lost_amount = min(balance, random.randint(500, 5_000))
+        attempts = 0
+        recover_at = now + ROBBERY_RECOVERY_SECONDS
+        connection.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = balance - ?, total_lost = total_lost + ?,
+                robbery_attempts = 0, robbery_recover_at = ?
+            WHERE user_id = ?
+            """,
+            (lost_amount, lost_amount, recover_at, user_id),
+        )
+        return "failed", balance - lost_amount, attempts, lost_amount, recover_at
 
 
 def record_bet_activity(
@@ -3098,7 +3482,11 @@ class BlackjackView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=self.create_embed(),
-                view=None if self.finished else self,
+                view=(
+                    BlackjackAgainView(self.user.id, self.bet)
+                    if self.finished
+                    else self
+                ),
             )
 
     @discord.ui.button(
@@ -3148,7 +3536,38 @@ class BlackjackView(discord.ui.View):
                     item.disabled = True
 
             if self.message is not None:
-                await self.message.edit(embed=self.create_embed(), view=self)
+                await self.message.edit(
+                    embed=self.create_embed(),
+                    view=BlackjackAgainView(self.user.id, self.bet),
+                )
+
+
+class BlackjackAgainView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.bet = bet
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Somente quem fez a aposta pode iniciar outra partida.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Jogar blackjack novamente",
+        emoji="🔁",
+        style=discord.ButtonStyle.primary,
+    )
+    async def repeat(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await repeat_blackjack(interaction, self.bet)
 
 
 class PrestigeConfirmView(discord.ui.View):
@@ -3918,6 +4337,18 @@ class DuelView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
+    def finished_view(self) -> discord.ui.View | None:
+        if not self.finished:
+            return self
+        if not self.accepted:
+            return None
+        return DuelAgainView(
+            self.challenger,
+            self.opponent,
+            self.bet,
+            self.game,
+        )
+
     async def _finish_round(self, winner_id: int | None, result: str) -> None:
         self.finished = True
         self.result = result
@@ -4055,7 +4486,7 @@ class DuelView(discord.ui.View):
                 )
             await interaction.response.edit_message(
                 embed=self.create_embed(),
-                view=None if self.finished else self,
+                view=self.finished_view(),
             )
 
     @discord.ui.button(
@@ -4162,7 +4593,7 @@ class DuelView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=self.create_embed(),
-                view=None if self.finished else self,
+                view=self.finished_view(),
             )
 
     @discord.ui.button(
@@ -4237,7 +4668,62 @@ class DuelView(discord.ui.View):
                 self._disable_all_buttons()
                 self.stop()
             if self.message is not None:
-                await self.message.edit(embed=self.create_embed(), view=None)
+                await self.message.edit(
+                    embed=self.create_embed(),
+                    view=self.finished_view(),
+                )
+
+
+class DuelAgainView(discord.ui.View):
+    def __init__(
+        self,
+        challenger: discord.User | discord.Member,
+        opponent: discord.User | discord.Member,
+        bet: int,
+        game: str,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.challenger = challenger
+        self.opponent = opponent
+        self.bet = bet
+        self.game = game
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id in (self.challenger.id, self.opponent.id):
+            return True
+        await interaction.response.send_message(
+            "Somente os participantes podem repetir este desafio.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Desafiar novamente",
+        emoji="🔁",
+        style=discord.ButtonStyle.primary,
+    )
+    async def repeat(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if not await ensure_betting_channel(interaction):
+            return
+        challenger_limit = get_player_bet_limit(self.challenger.id)
+        opponent_limit = get_player_bet_limit(self.opponent.id)
+        if self.bet > min(challenger_limit, opponent_limit):
+            await interaction.response.send_message(
+                "O limite de aposta de um dos participantes mudou; "
+                "inicie outro desafio com um valor menor.",
+                ephemeral=True,
+            )
+            return
+        view = DuelView(self.challenger, self.opponent, self.bet, self.game)
+        await interaction.response.edit_message(
+            embed=view.create_embed(),
+            view=view,
+        )
+        view.message = interaction.message
 
 
 async def is_bot_owner(interaction: discord.Interaction) -> bool:
@@ -4401,8 +4887,8 @@ async def daily(interaction: discord.Interaction) -> None:
         return
 
     await interaction.response.send_message(
-        f"{interaction.user.mention} recebeu {amount} moedas de recompensa diária. "
-        f"Saldo: {balance} moedas!"
+        f"{interaction.user.mention} recebeu {format_coins(amount)} moedas "
+        f"de recompensa diária. Saldo: {format_coins(balance)} moedas!"
     )
 
 
@@ -4418,8 +4904,8 @@ async def weekly(interaction: discord.Interaction) -> None:
         return
 
     await interaction.response.send_message(
-        f"{interaction.user.mention} recebeu {amount} moedas de recompensa semanal. "
-        f"Saldo: {balance} moedas!"
+        f"{interaction.user.mention} recebeu {format_coins(amount)} moedas "
+        f"de recompensa semanal. Saldo: {format_coins(balance)} moedas!"
     )
 
 
@@ -4435,8 +4921,8 @@ async def monthly(interaction: discord.Interaction) -> None:
         return
 
     await interaction.response.send_message(
-        f"{interaction.user.mention} recebeu {amount} moedas de recompensa mensal. "
-        f"Saldo: {balance} moedas!"
+        f"{interaction.user.mention} recebeu {format_coins(amount)} moedas "
+        f"de recompensa mensal. Saldo: {format_coins(balance)} moedas!"
     )
 
 
@@ -4444,9 +4930,239 @@ async def monthly(interaction: discord.Interaction) -> None:
 async def saldo(interaction: discord.Interaction) -> None:
     balance = get_balance(interaction.user.id)
     await interaction.response.send_message(
-        f"{interaction.user.mention}, seu saldo é de {balance} moedas.",
+        f"{interaction.user.mention}, seu saldo é de "
+        f"{format_coins(balance)} moedas.",
         ephemeral=True,
     )
+
+
+class JobSelectView(discord.ui.View):
+    def __init__(self, user_id: int) -> None:
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        options = [
+            discord.SelectOption(
+                label=name,
+                value=job_key,
+                description=(
+                    f"Inscrição: {format_coins(cost)} moedas | "
+                    f"Salário: {format_coins(hourly_rate)} moedas/h"
+                ),
+                emoji="💼",
+            )
+            for job_key, (name, cost, hourly_rate) in JOBS.items()
+        ]
+        self.add_item(JobSelect(options))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Este seletor de trabalho pertence a outra pessoa.",
+            ephemeral=True,
+        )
+        return False
+
+
+class JobSelect(discord.ui.Select):
+    def __init__(self, options: list[discord.SelectOption]) -> None:
+        super().__init__(
+            placeholder="Escolha seu próximo trabalho",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        status, balance = change_player_job(
+            interaction.user.id,
+            self.values[0],
+        )
+        if status == "casino_owner":
+            await interaction.response.edit_message(
+                content="Donos de cassino não podem trocar de trabalho.",
+                embed=None,
+                view=None,
+            )
+            return
+        if status == "same_job":
+            await interaction.response.send_message(
+                "Você já trabalha nessa profissão.",
+                ephemeral=True,
+            )
+            return
+        if status == "insufficient":
+            cost = JOBS[self.values[0]][1]
+            await interaction.response.send_message(
+                f"A inscrição custa {format_coins(cost)} moedas; "
+                f"seu saldo é {format_coins(balance)} moedas.",
+                ephemeral=True,
+            )
+            return
+
+        job_name, application_cost, hourly_rate = JOBS[self.values[0]]
+        embed = discord.Embed(
+            title="💼 Novo trabalho confirmado",
+            description=f"Agora você trabalha como **{job_name}**.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="Taxa de inscrição",
+            value=f"{format_coins(application_cost)} moedas",
+            inline=True,
+        )
+        embed.add_field(
+            name="Salário por hora",
+            value=f"{format_coins(hourly_rate)} moedas",
+            inline=True,
+        )
+        embed.add_field(
+            name="Saldo restante",
+            value=f"{format_coins(balance)} moedas",
+            inline=True,
+        )
+        self.view.stop()
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+@bot.tree.command(
+    name="mudar_trabalho",
+    description="Escolha um trabalho e pague a taxa de inscrição.",
+)
+async def mudar_trabalho(interaction: discord.Interaction) -> None:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection:
+        owns_casino = connection.execute(
+            "SELECT 1 FROM guild_casinos WHERE owner_id = ? LIMIT 1",
+            (interaction.user.id,),
+        ).fetchone()
+    if owns_casino is not None:
+        await interaction.response.send_message(
+            "Este upgrade de trabalho só está disponível para quem não possui cassino.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="📋 Mudar de trabalho",
+        description=(
+            "Selecione uma profissão. A taxa de inscrição é cobrada "
+            "imediatamente e cada trabalho paga por hora trabalhada."
+        ),
+        color=discord.Color.blurple(),
+    )
+    for name, cost, hourly_rate in JOBS.values():
+        embed.add_field(
+            name=name,
+            value=(
+                f"Inscrição: **{format_coins(cost)} moedas**\n"
+                f"Salário: **{format_coins(hourly_rate)} moedas/h**"
+            ),
+            inline=True,
+        )
+    await interaction.response.send_message(
+        embed=embed,
+        view=JobSelectView(interaction.user.id),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="workshift",
+    description="Trabalhe um período aleatório, até 8 horas por dia.",
+)
+async def workshift(interaction: discord.Interaction) -> None:
+    status, job_key, duration, payout, balance, remaining, resets_at = (
+        work_player_shift(interaction.user.id)
+    )
+    if status == "limit":
+        await interaction.response.send_message(
+            "Você já trabalhou o limite de **8 horas**. "
+            f"As horas serão recuperadas em {format_remaining(resets_at - int(time.time()))}.",
+            ephemeral=True,
+        )
+        return
+
+    job_name, _, hourly_rate = JOBS[job_key]
+    embed = discord.Embed(
+        title="🧰 Turno concluído",
+        description=(
+            f"{interaction.user.mention}, você trabalhou como "
+            f"**{job_name}** por **{format_remaining(duration)}**."
+        ),
+        color=discord.Color.green(),
+    )
+    embed.add_field(
+        name="Pagamento",
+        value=f"+{format_coins(payout)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Salário por hora",
+        value=f"{format_coins(hourly_rate)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Saldo atual",
+        value=f"{format_coins(balance)} moedas",
+        inline=True,
+    )
+    embed.add_field(
+        name="Horas restantes hoje",
+        value=f"{format_remaining(remaining)} de 8h",
+        inline=False,
+    )
+    embed.set_footer(text="O limite de trabalho é renovado a cada 24 horas.")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="roubar",
+    description="Tente roubar moedas; você pode ganhar ou perder dinheiro.",
+)
+async def roubar(interaction: discord.Interaction) -> None:
+    status, balance, attempts, amount, recover_at = attempt_robbery(
+        interaction.user.id
+    )
+    if status == "cooldown":
+        remaining = max(0, (recover_at or 0) - int(time.time()))
+        await interaction.response.send_message(
+            f"Você esgotou suas tentativas. As **5 tentativas** voltam em "
+            f"{format_remaining(remaining)}.",
+            ephemeral=True,
+        )
+        return
+
+    if status == "success":
+        title = "🤑 Roubo bem-sucedido!"
+        description = f"Você conseguiu **{format_coins(amount)} moedas**."
+        color = discord.Color.green()
+    else:
+        title = "🚨 Você foi pego!"
+        description = (
+            f"Você perdeu **{format_coins(amount)} moedas** e suas tentativas "
+            "foram esgotadas."
+        )
+        color = discord.Color.red()
+
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.add_field(
+        name="Tentativas restantes",
+        value=f"{format_coins(attempts)} de {ROBBERY_MAX_ATTEMPTS}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Saldo atual",
+        value=f"{format_coins(balance)} moedas",
+        inline=True,
+    )
+    if attempts == 0 and recover_at is not None:
+        embed.set_footer(
+            text=(
+                "Todas as tentativas voltam em "
+                f"{format_remaining(recover_at - int(time.time()))}."
+            )
+        )
+    await interaction.response.send_message(embed=embed)
 
 
 class PlayerDataResetView(discord.ui.View):
@@ -4680,8 +5396,10 @@ async def leaderboard(interaction: discord.Interaction) -> None:
         return
 
     lines = [
-        f"**{position}.** <@{user_id}> — **{balance}** moedas"
-        f" | Ganho: {earned} | Perdido: {lost}"
+        f"**{format_coins(position)}.** <@{user_id}> — "
+        f"**{format_coins(balance)}** moedas"
+        f" | Ganho: {format_coins(earned)}"
+        f" | Perdido: {format_coins(lost)}"
         for position, (user_id, balance, earned, lost) in enumerate(ranking, start=1)
     ]
     embed = discord.Embed(
@@ -6337,6 +7055,12 @@ async def cacaniquel(
     await interaction.followup.send(
         embed=embed,
         file=discord.File(animation, filename="cacaniquel.gif"),
+        view=BetAgainView(
+            interaction.user.id,
+            "cacaniquel",
+            aposta,
+            "giro",
+        ),
     )
 
 
@@ -6468,7 +7192,15 @@ async def corrida(
         inline=True,
     )
     embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed,
+        view=BetAgainView(
+            interaction.user.id,
+            "corrida",
+            aposta,
+            tuple(selected_animals),
+        ),
+    )
 
 
 @bot.tree.command(name="moeda", description="Aposte em cara ou coroa e ganhe o dobro do retorno.")
@@ -6518,6 +7250,12 @@ async def moeda(
         result=f"A moeda caiu em **{result.capitalize()}**.",
         payout=payout,
         balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            "moeda",
+            aposta,
+            escolha.value,
+        ),
     )
 
 
@@ -6579,6 +7317,12 @@ async def dados(
         result=f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'}).",
         payout=payout,
         balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            "dados",
+            aposta,
+            escolha.value,
+        ),
     )
 
 
@@ -6638,6 +7382,12 @@ async def roleta(
         result=f"A roleta parou no **{number} {result_color}**.",
         payout=payout,
         balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            "roleta",
+            aposta,
+            cor.value,
+        ),
     )
 
 
@@ -6745,10 +7495,67 @@ async def blackjack(
 
     await interaction.response.send_message(
         embed=game.create_embed(),
-        view=None if game.finished else game,
+        view=(
+            BlackjackAgainView(interaction.user.id, aposta)
+            if game.finished
+            else game
+        ),
     )
     if not game.finished:
         game.message = await interaction.original_response()
+
+
+async def repeat_blackjack(
+    interaction: discord.Interaction,
+    bet: int,
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, bet):
+        return
+
+    house_owner_id = get_house_owner_id()
+    reserved, balance, reservation_or_reason = reserve_blackjack_bet(
+        interaction.user.id,
+        house_owner_id,
+        bet,
+    )
+    if not reserved:
+        message = (
+            f"Saldo insuficiente. Você tem {format_coins(balance)} moedas."
+            if reservation_or_reason == "player"
+            else "A banca principal não tem saldo livre suficiente para cobrir "
+            "a aposta máxima desta partida."
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+
+    cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+    game = BlackjackView(
+        interaction.user,
+        bet,
+        [random.choice(cards), random.choice(cards)],
+        [random.choice(cards), random.choice(cards)],
+        balance,
+        house_owner_id,
+        reservation_or_reason,
+    )
+    if hand_total(game.player_cards) == 21:
+        game.result = "Blackjack! Sua mão inicial chegou a 21."
+        game._resolve()
+
+    await interaction.response.edit_message(
+        embed=game.create_embed(),
+        view=(
+            BlackjackAgainView(interaction.user.id, bet)
+            if game.finished
+            else game
+        ),
+    )
+    if not game.finished:
+        game.message = interaction.message
 
 @bot.tree.command(name="clear", description="Apaga de 1 a 100 mensagens recentes do canal.")
 @app_commands.guild_only()
