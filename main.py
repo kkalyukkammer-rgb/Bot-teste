@@ -26,10 +26,13 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "Novidades: comandos /workshift e /mudar_trabalho com limite diário de "
-    "8 horas e empregos com salários e custos próprios; /roubar com até "
-    "5 tentativas e recuperação após 24 horas quando esgotadas; apostas com "
-    "botão para jogar novamente na mesma mensagem; interfaces mais interativas."
+    "**Novidades:** /workshift e /mudar_trabalho com limite diário de 8 horas "
+    "e empregos com salários e custos próprios; /roubar com até 5 tentativas "
+    "e recuperação após 24 horas; botão para repetir apostas na mesma mensagem.\n\n"
+    "**Correções:** /moeda, /dados e /roleta voltaram a enviar os resultados "
+    "normalmente; os resultados repetidos continuam atualizando a mensagem "
+    "original. Correções em comandos e mecânicas também serão incluídas "
+    "neste resumo a cada atualização."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10

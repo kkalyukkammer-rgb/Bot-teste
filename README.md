@@ -64,10 +64,11 @@ Ao iniciar, o bot publica no canal `1560451788254216343` do servidor
 `UPDATE_ANNOUNCEMENT_MESSAGE` no código e menciona o cargo
 `1559362476921987072`. O texto é enviado automaticamente quando muda e seu
 envio fica registrado no banco, sem consultar commits Git. Ao preparar uma
-atualização, ajuste esse texto para resumir as funcionalidades alteradas; esta
-versão anuncia os novos comandos de trabalho e roubo e os botões de repetição
-das apostas. O owner também pode usar `/anunciar_update` para reenviar
-manualmente a mensagem atual. O bot
+atualização, ajuste esse texto para resumir novidades e também correções em
+comandos e mecânicas. Esta versão anuncia os novos comandos de trabalho e
+roubo, os botões para repetir apostas e a correção do envio dos resultados de
+`/moeda`, `/dados` e `/roleta`. O owner também pode usar `/anunciar_update`
+para reenviar manualmente a mensagem atual. O bot
 precisa ter permissão para enviar mensagens e embeds; o cargo deve existir no
 servidor e ser mencionável pelo bot.
 
