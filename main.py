@@ -26,6 +26,7 @@ logger = logging.getLogger("discord_bot")
 BOT_OWNER_ID = 1079199747019112520
 UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
+UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
@@ -3791,6 +3792,15 @@ class BotDiscord(discord.Client):
             return
 
         head_commit, updates = pending
+        await self.publish_git_updates(head_commit, updates)
+
+    async def publish_git_updates(
+        self,
+        head_commit: str,
+        updates: list[str],
+        *,
+        mention_role: bool = False,
+    ) -> bool:
         channel = self.get_channel(UPDATE_ANNOUNCEMENT_CHANNEL_ID)
         if channel is None:
             try:
@@ -3803,7 +3813,7 @@ class BotDiscord(discord.Client):
                     UPDATE_ANNOUNCEMENT_CHANNEL_ID,
                     exc_info=(type(error), error, error.__traceback__),
                 )
-                return
+                return False
 
         channel_guild = getattr(channel, "guild", None)
         if (
@@ -3815,7 +3825,7 @@ class BotDiscord(discord.Client):
                 UPDATE_ANNOUNCEMENT_CHANNEL_ID,
                 UPDATE_ANNOUNCEMENT_GUILD_ID,
             )
-            return
+            return False
 
         embed = discord.Embed(
             title="Atualizações do bot",
@@ -3825,8 +3835,21 @@ class BotDiscord(discord.Client):
         )
         try:
             await channel.send(
+                content=(
+                    f"<@&{UPDATE_ANNOUNCEMENT_ROLE_ID}>"
+                    if mention_role
+                    else None
+                ),
                 embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions=(
+                    discord.AllowedMentions(
+                        roles=True,
+                        users=False,
+                        everyone=False,
+                    )
+                    if mention_role
+                    else discord.AllowedMentions.none()
+                ),
             )
         except discord.HTTPException as error:
             logger.error(
@@ -3834,7 +3857,7 @@ class BotDiscord(discord.Client):
                 UPDATE_ANNOUNCEMENT_CHANNEL_ID,
                 exc_info=(type(error), error, error.__traceback__),
             )
-            return
+            return False
 
         try:
             set_last_announced_commit(head_commit)
@@ -3843,8 +3866,10 @@ class BotDiscord(discord.Client):
                 "As atualizações foram publicadas, mas o commit anunciado "
                 "não pôde ser salvo."
             )
-            return
-        self.pending_update_announcement = None
+            return False
+        if self.pending_update_announcement == (head_commit, updates):
+            self.pending_update_announcement = None
+        return True
 
     async def npc_betting_loop(self) -> None:
         while not self.is_closed():
@@ -7139,6 +7164,60 @@ async def ajuda(interaction: discord.Interaction) -> None:
         color=discord.Color.blue(),
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="anunciar_update",
+    description="Publica as atualizações do bot e menciona o cargo configurado.",
+)
+@app_commands.check(is_bot_owner)
+async def anunciar_update(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        previous_commit = get_last_announced_commit()
+    except sqlite3.Error:
+        logger.exception(
+            "Não foi possível carregar o estado dos anúncios de atualização."
+        )
+        await interaction.followup.send(
+            "Não foi possível consultar o histórico de anúncios. Confira os logs.",
+            ephemeral=True,
+        )
+        return
+
+    update_info = get_git_update_info(previous_commit)
+    if update_info is None:
+        await interaction.followup.send(
+            "Não consegui ler os commits do repositório. Confira os logs do bot.",
+            ephemeral=True,
+        )
+        return
+    if not update_info[1]:
+        update_info = get_git_update_info(None)
+    if update_info is None or not update_info[1]:
+        await interaction.followup.send(
+            "Não há commits disponíveis para publicar como atualização.",
+            ephemeral=True,
+        )
+        return
+
+    published = await bot.publish_git_updates(
+        *update_info,
+        mention_role=True,
+    )
+    if not published:
+        await interaction.followup.send(
+            "Não foi possível confirmar a publicação. Confira o canal e os logs; "
+            "se a mensagem chegou, o estado do anúncio pode não ter sido salvo.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        "Atualização publicada no canal configurado com a menção ao cargo.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="shutdown", description="Desliga o bot.")

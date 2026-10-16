@@ -48,6 +48,10 @@ no canal `1560451788254216343` do servidor `1467549007932030998`. Se ainda não
 houver um commit anunciado salvo, publica somente o commit mais recente para
 evitar enviar o histórico inteiro. O processo precisa ter Git e o repositório
 disponível, além de permissão para enviar mensagens e embeds nesse canal.
+O owner também pode usar `/anunciar_update` para publicar manualmente os
+commits disponíveis e mencionar o cargo `1559362476921987072`. Se não houver
+commits novos, o comando permite reenviar o commit mais recente. O cargo deve
+estar no servidor de anúncios e ser mencionável pelo bot.
 
 Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 `/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada
