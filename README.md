@@ -24,6 +24,11 @@ jogadores dos dados de atividade de NPCs; também mostra o resultado líquido
 das apostas e taxas recebidas de cassinos locais. `/status_cassino` mostra,
 em categorias distintas, as apostas de jogadores e a operação de NPCs.
 
+`/status_apostador` mostra em uma resposta privada o próprio saldo,
+ganhos/perdas acumulados, volume e quantidade de apostas, prestígio,
+upgrades e disponibilidade das recompensas. Quando usado em um servidor
+com cassino próprio, também inclui saldo, apostas e recompensas locais.
+
 Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 `/upgrade_prestigio` exibem uma confirmação antes da compra. Depois de cada
 compra, a mensagem oferece o próximo nível do mesmo upgrade para confirmação

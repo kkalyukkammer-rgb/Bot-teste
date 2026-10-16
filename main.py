@@ -819,6 +819,74 @@ def get_balance(user_id: int) -> int:
     return account[0] if account else 0
 
 
+def get_player_status(
+    user_id: int,
+    guild_id: int | None = None,
+) -> tuple[
+    tuple[
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int | None,
+        int | None,
+        int | None,
+    ],
+    tuple[
+        str,
+        str,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int | None,
+        int | None,
+    ]
+    | None,
+]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        account = connection.execute(
+            """
+            SELECT balance, total_earned, total_lost, prestige_level,
+                   prestige_points, prestige_upgrade_gains,
+                   prestige_upgrade_rewards, prestige_upgrade_bet_limit,
+                   total_bet_volume, total_bet_count, daily_claim_at,
+                   weekly_claim_at, monthly_claim_at
+            FROM economy_accounts WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        global_status = account or (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None)
+
+        local_status = None
+        if guild_id is not None:
+            local_status = connection.execute(
+                """
+                SELECT c.name, c.currency_name,
+                       COALESCE(a.balance, 0),
+                       COALESCE(a.total_earned, 0),
+                       COALESCE(a.total_lost, 0),
+                       COALESCE(a.total_bet_volume, 0),
+                       COALESCE(a.total_bet_count, 0),
+                       a.daily_claim_at, a.weekly_claim_at
+                FROM guild_casinos AS c
+                LEFT JOIN guild_casino_accounts AS a
+                    ON a.guild_id = c.guild_id AND a.user_id = ?
+                WHERE c.guild_id = ?
+                """,
+                (user_id, guild_id),
+            ).fetchone()
+
+    return global_status, local_status
+
+
 def get_prestige_status(user_id: int) -> tuple[int, int, int, int, int, int, int]:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         account = connection.execute(
@@ -2743,6 +2811,20 @@ def format_remaining(seconds: int) -> str:
     return f"{minutes}min"
 
 
+def reward_cooldown_status(
+    last_claim_at: int | None,
+    cooldown: int,
+    now: int | None = None,
+) -> str:
+    if last_claim_at is None:
+        return "Disponível agora"
+    current_time = int(time.time()) if now is None else now
+    remaining = cooldown - (current_time - last_claim_at)
+    if remaining <= 0:
+        return "Disponível agora"
+    return f"em {format_remaining(remaining)}"
+
+
 def hand_total(cards: list[str]) -> int:
     total = sum(
         10 if card in ("J", "Q", "K") else 11 if card == "A" else int(card)
@@ -4165,6 +4247,110 @@ async def saldo(interaction: discord.Interaction) -> None:
         f"{interaction.user.mention}, seu saldo é de {balance} moedas.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(
+    name="status_apostador",
+    description="Mostra suas estatísticas pessoais de moedas e apostas.",
+)
+async def status_apostador(interaction: discord.Interaction) -> None:
+    guild_id = interaction.guild.id if interaction.guild is not None else None
+    global_status, local_status = get_player_status(
+        interaction.user.id,
+        guild_id,
+    )
+    (
+        balance,
+        total_earned,
+        total_lost,
+        prestige_level,
+        prestige_points,
+        prestige_upgrade_gains,
+        prestige_upgrade_rewards,
+        prestige_upgrade_bet_limit,
+        bet_volume,
+        bet_count,
+        daily_claim_at,
+        weekly_claim_at,
+        monthly_claim_at,
+    ) = global_status
+
+    embed = discord.Embed(
+        title=f"Seu status de apostador — {interaction.user.display_name}",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Saldo global",
+        value=f"**{format_coins(balance)} moedas**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Ganhos e perdas acumulados",
+        value=(
+            f"Ganhos totais: **{format_coins(total_earned)} moedas**\n"
+            f"Perdas totais: **{format_coins(total_lost)} moedas**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Suas apostas globais",
+        value=(
+            f"Volume apostado: **{format_coins(bet_volume)} moedas**\n"
+            f"Quantidade de apostas: **{format_coins(bet_count)}**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Prestígio e upgrades",
+        value=(
+            f"Prestígio: **{prestige_level}/{PRESTIGE_MAX_LEVEL}**\n"
+            f"Pontos disponíveis: **{format_coins(prestige_points)}**\n"
+            f"Bônus de ganhos: **nível {prestige_upgrade_gains}**\n"
+            f"Bônus de recompensas: **nível {prestige_upgrade_rewards}**\n"
+            f"Limite extra de aposta: **"
+            f"{format_coins(prestige_upgrade_bet_limit * PLAYER_BET_LIMIT_PER_UPGRADE)} moedas**\n"
+            f"Limite atual: **"
+            f"{format_coins(get_player_bet_limit(interaction.user.id))} moedas**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Recompensas globais",
+        value=(
+            f"Daily: **{reward_cooldown_status(daily_claim_at, REWARD_SETTINGS['daily'][1])}**\n"
+            f"Weekly: **{reward_cooldown_status(weekly_claim_at, REWARD_SETTINGS['weekly'][1])}**\n"
+            f"Monthly: **{reward_cooldown_status(monthly_claim_at, REWARD_SETTINGS['monthly'][1])}**"
+        ),
+        inline=False,
+    )
+    if local_status is not None:
+        (
+            casino_name,
+            currency_name,
+            local_balance,
+            local_earned,
+            local_lost,
+            local_bet_volume,
+            local_bet_count,
+            local_daily_claim_at,
+            local_weekly_claim_at,
+        ) = local_status
+        embed.add_field(
+            name=f"Seu status em {casino_name}",
+            value=(
+                f"Saldo: **{format_coins(local_balance)} {currency_name}**\n"
+                f"Ganhos acumulados: **{format_coins(local_earned)} {currency_name}**\n"
+                f"Perdas acumuladas: **{format_coins(local_lost)} {currency_name}**\n"
+                f"Volume apostado: **{format_coins(local_bet_volume)} {currency_name}**\n"
+                f"Apostas: **{format_coins(local_bet_count)}**\n"
+                f"Daily do cassino: **"
+                f"{reward_cooldown_status(local_daily_claim_at, CASINO_REWARD_SETTINGS['daily'][1])}**\n"
+                f"Weekly do cassino: **"
+                f"{reward_cooldown_status(local_weekly_claim_at, CASINO_REWARD_SETTINGS['weekly'][1])}**"
+            ),
+            inline=False,
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard", description="Mostra o ranking de moedas deste servidor.")
