@@ -807,6 +807,16 @@ class CommandSpamGuard:
     self.punishment_limit = punishment_limit
     self._timestamps.clear()
 
+  def clear_user(self, user_id: int) -> bool:
+    had_spam_state = any(
+        user_id in tracked
+        for tracked in (self._timestamps, self._restrictions, self._blocked_until)
+    )
+    self._timestamps.pop(user_id, None)
+    self._restrictions.pop(user_id, None)
+    self._blocked_until.pop(user_id, None)
+    return had_spam_state
+
   def check(self, user_id: int, now: float | None = None) -> int | None:
     current = time.monotonic() if now is None else now
 
@@ -1009,25 +1019,32 @@ async def desbloquear(
         ephemeral=True,
     )
 
-  if usuario.id not in blacklist:
+  was_blacklisted = usuario.id in blacklist
+  if was_blacklisted:
+    blacklist.remove(usuario.id)
+    try:
+      salvar_blacklist(blacklist)
+    except BlacklistError:
+      return await interaction.response.send_message(
+          "Nao foi possivel salvar a lista de bloqueio.", ephemeral=True
+      )
+
+  was_auto_blocked = COMMAND_SPAM_GUARD.clear_user(usuario.id)
+  if not was_blacklisted and not was_auto_blocked:
     return await interaction.response.send_message(
-        f"⚠️ O usuário {usuario.mention} não está na lista de bloqueados.",
+        f"O usuario {usuario.mention} nao possui bloqueio manual nem autoblock ativo.",
         ephemeral=True,
     )
 
-  blacklist.remove(usuario.id)
-  try:
-    salvar_blacklist(blacklist)
-  except BlacklistError:
-    return await interaction.response.send_message(
-        "⚠️ Não foi possível salvar a lista de bloqueio.", ephemeral=True
-    )
-
+  cleared = []
+  if was_blacklisted:
+    cleared.append("bloqueio manual")
+  if was_auto_blocked:
+    cleared.append("autoblock e historico de punicoes")
   await interaction.response.send_message(
-      f"✅ O usuário {usuario.mention} foi **desbloqueado** dos comandos do bot.",
+      f"Bloqueio removido para {usuario.mention}: **{' + '.join(cleared)}**.",
       ephemeral=True,
   )
-
 
 
 def migrate_legacy_economy_database(
