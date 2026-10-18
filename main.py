@@ -1,6 +1,6 @@
 import asyncio
-from contextlib import closing
 import io
+import json
 import logging
 import math
 import os
@@ -9,14 +9,13 @@ import sqlite3
 import tempfile
 import time
 import unicodedata
+from contextlib import closing
 from typing import Literal
-import json
-
 
 import discord
 from discord import app_commands
-from PIL import Image, ImageDraw, ImageFont
 from discord.ext import commands
+from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,22 +27,24 @@ BOT_OWNER_ID = 1079199747019112520
 UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
-BLACKLIST_FILE = "blacklist.json"
 UPDATE_ANNOUNCEMENT_MESSAGE = (
     "*MINI UPDATE*\n\n"
-    "**BALANCEAMENTOS E QOL** \n\n"
-    "Melhorias nas recompensas de alguns jogos e ajustes no sistema de economia.\n\n"
-    "adição de bonus de winstreack no jogo blackjack, podendo chegar até +200% (porecento) de bônus, ganhando 10% por vitoria\n\n"
-    "balanceamento no jogo blackjack, agora foram reduzida as chances de vir, por terem mesmo valor acabavam vindo com muita frequencia e em excesso.\n\n"
-    "**MELHORIAS NA INTERFACE DO JOGO** \n\n"
-    "Adição de gifs nos jogos de roleta e dados.\n\n"
-    
+    "**NOVOS JOGOS**\n\n"
+    "Agora voc\u00ea pode jogar `/raspadinha`, combinando tr\u00eas s\u00edmbolos, e "
+    "`/campo_minado`, escolhendo abrir de 1 a 5 casas e controlar o risco.\n\n"
+    "Os dois jogos t\u00eam GIFs animados pr\u00f3prios, bot\u00e3o para repetir a aposta "
+    "e retorno esperado pr\u00f3ximo de 95%, antes dos b\u00f4nus de prest\u00edgio.\n\n"
+    "Os jogos tamb\u00e9m est\u00e3o dispon\u00edveis em `/jogar_cassino`: Campo Minado "
+    "a partir do n\u00edvel 2 e Raspadinha no n\u00edvel 3. Eles foram inclu\u00eddos no "
+    "guia `/ajuda`.\n\n"
+    "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
 MAIN_HOUSE_UPGRADE_NPC_BONUS = 20
 PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+BLACKLIST_FILE = os.path.join(PROJECT_DIRECTORY, "blacklist.json")
 BACKUP_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "backup")
 DEFAULT_ECONOMY_DB_PATH = os.path.join(BACKUP_DIRECTORY, "economy.sqlite3")
 LEGACY_ECONOMY_DB_PATH = os.path.join(PROJECT_DIRECTORY, "economy.sqlite3")
@@ -141,8 +142,14 @@ CASINO_GAME_UNLOCKS = {
     "dados": 3,
     "roleta": 1,
     "maior_menor": 2,
+    "campo_minado": 2,
     "cacaniquel": 3,
     "jokenpo": 3,
+    "raspadinha": 3,
+}
+CASINO_GAME_DISPLAY_NAMES = {
+    "campo_minado": "Campo Minado",
+    "raspadinha": "Raspadinha",
 }
 PVP_HOUSE_TAX_PERCENT = 5
 CASINO_PARTICIPANT_COMMANDS = frozenset(
@@ -157,6 +164,8 @@ CASINO_PARTICIPANT_COMMANDS = frozenset(
         "blackjack",
         "maior_menor",
         "jokenpo",
+        "campo_minado",
+        "raspadinha",
     }
 )
 CASINO_ROLE_REFRESH_COMMANDS = CASINO_PARTICIPANT_COMMANDS | frozenset(
@@ -562,16 +571,91 @@ def initialize_economy() -> None:
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
                 
-def carregar_blacklist():
-  if os.path.exists(BLACKLIST_FILE):
-    with open(BLACKLIST_FILE, "r") as f:
-      return json.load(f)
-  return []
+class BlacklistError(Exception):
+  """Indica que a blacklist não pôde ser lida ou gravada com segurança."""
 
 
-def salvar_blacklist(lista):
-  with open(BLACKLIST_FILE, "w") as f:
-    json.dump(lista, f, indent=4)
+def carregar_blacklist() -> list[int]:
+  try:
+    with open(BLACKLIST_FILE, "r", encoding="utf-8") as arquivo:
+      dados = json.load(arquivo)
+  except FileNotFoundError:
+    return []
+  except (OSError, json.JSONDecodeError) as erro:
+    logger.exception("Não foi possível carregar a blacklist.")
+    raise BlacklistError("Não foi possível ler a lista de bloqueio.") from erro
+
+  if not isinstance(dados, list):
+    logger.error("Formato inválido em %s: esperado uma lista.", BLACKLIST_FILE)
+    raise BlacklistError("A lista de bloqueio está em formato inválido.")
+
+  ids = []
+  for item in dados:
+    # Aceita arquivos antigos com IDs salvos como texto, mas rejeita outros dados.
+    if isinstance(item, bool):
+      logger.error("ID inválido encontrado na blacklist: %r", item)
+      raise BlacklistError("A lista de bloqueio contém um ID inválido.")
+    if isinstance(item, int):
+      user_id = item
+    elif isinstance(item, str) and item.isdecimal():
+      user_id = int(item)
+    else:
+      logger.error("ID inválido encontrado na blacklist: %r", item)
+      raise BlacklistError("A lista de bloqueio contém um ID inválido.")
+    if user_id > 0 and user_id not in ids:
+      ids.append(user_id)
+  return ids
+
+
+def salvar_blacklist(lista: list[int]) -> None:
+  caminho_temporario = f"{BLACKLIST_FILE}.tmp"
+  try:
+    with open(caminho_temporario, "w", encoding="utf-8") as arquivo:
+      json.dump(sorted(set(lista)), arquivo, indent=4)
+      arquivo.flush()
+      os.fsync(arquivo.fileno())
+    os.replace(caminho_temporario, BLACKLIST_FILE)
+  except OSError as erro:
+    logger.exception("Não foi possível salvar a blacklist.")
+    try:
+      if os.path.exists(caminho_temporario):
+        os.remove(caminho_temporario)
+    except OSError:
+      logger.exception("Não foi possível limpar o arquivo temporário da blacklist.")
+    raise BlacklistError("Não foi possível salvar a lista de bloqueio.") from erro
+
+
+async def verificar_usuario_bloqueado(interaction: discord.Interaction) -> bool:
+  if interaction.user.id == BOT_OWNER_ID:
+    return False
+  try:
+    blacklist = carregar_blacklist()
+  except BlacklistError:
+    if not interaction.response.is_done():
+      await interaction.response.send_message(
+          "⚠️ A lista de bloqueio está temporariamente indisponível. Tente novamente mais tarde.",
+          ephemeral=True,
+      )
+    return True
+
+  if interaction.user.id in blacklist:
+    if not interaction.response.is_done():
+      await interaction.response.send_message(
+          "❌ Você está **bloqueado** de usar os comandos deste bot.",
+          ephemeral=True,
+      )
+    return True
+  return False
+
+
+class BlacklistView(discord.ui.View):
+  async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    return not await verificar_usuario_bloqueado(interaction)
+
+
+class BlacklistCommandTree(app_commands.CommandTree):
+  async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    return not await verificar_usuario_bloqueado(interaction)
 
 
 class MeuBot(commands.Bot):
@@ -588,22 +672,6 @@ class MeuBot(commands.Bot):
 bot = MeuBot()
 
 
-# Verificação global para comandos de barra (Slash Commands)
-@bot.tree.interaction_check
-async def verificar_blacklist(interaction: discord.Interaction) -> bool:
-  blacklist = carregar_blacklist()
-
-  # Se o usuário estiver na blacklist e não for o owner
-  if interaction.user.id in blacklist and interaction.user.id != BOT_OWNER_ID:
-    await interaction.response.send_message(
-        "❌ Você está **bloqueado** de usar os comandos deste bot.",
-        ephemeral=True,
-    )
-    return False
-
-  return True
-
-
 # ---------------------------------------------------------
 # COMANDOS PARA O OWNER (Bloquear / Desbloquear / Listar)
 # ---------------------------------------------------------
@@ -613,14 +681,20 @@ async def verificar_blacklist(interaction: discord.Interaction) -> bool:
     name="bloquear", description="Bloqueia um usuário de usar os comandos (Owner)"
 )
 @app_commands.describe(usuario="O usuário que deseja bloquear")
-async def bloquear(interaction: discord.Interaction, usuario: discord.Member):
+async def bloquear(interaction: discord.Interaction, usuario: discord.User):
   # Verifica se quem está executando é o Owner
   if interaction.user.id != BOT_OWNER_ID:
     return await interaction.response.send_message(
         "❌ Apenas o dono do bot pode usar este comando.", ephemeral=True
     )
 
-  blacklist = carregar_blacklist()
+  try:
+    blacklist = carregar_blacklist()
+  except BlacklistError:
+    return await interaction.response.send_message(
+        "⚠️ Não foi possível ler a lista de bloqueio. Nenhuma alteração foi feita.",
+        ephemeral=True,
+    )
 
   if usuario.id == BOT_OWNER_ID:
     return await interaction.response.send_message(
@@ -633,7 +707,12 @@ async def bloquear(interaction: discord.Interaction, usuario: discord.Member):
     )
 
   blacklist.append(usuario.id)
-  salvar_blacklist(blacklist)
+  try:
+    salvar_blacklist(blacklist)
+  except BlacklistError:
+    return await interaction.response.send_message(
+        "⚠️ Não foi possível salvar a lista de bloqueio.", ephemeral=True
+    )
 
   await interaction.response.send_message(
       f"🚫 O usuário {usuario.mention} foi **bloqueado** dos comandos do bot.",
@@ -647,14 +726,20 @@ async def bloquear(interaction: discord.Interaction, usuario: discord.Member):
 )
 @app_commands.describe(usuario="O usuário que deseja desbloquear")
 async def desbloquear(
-    interaction: discord.Interaction, usuario: discord.Member
+    interaction: discord.Interaction, usuario: discord.User
 ):
   if interaction.user.id != BOT_OWNER_ID:
     return await interaction.response.send_message(
         "❌ Apenas o dono do bot pode usar este comando.", ephemeral=True
     )
 
-  blacklist = carregar_blacklist()
+  try:
+    blacklist = carregar_blacklist()
+  except BlacklistError:
+    return await interaction.response.send_message(
+        "⚠️ Não foi possível ler a lista de bloqueio. Nenhuma alteração foi feita.",
+        ephemeral=True,
+    )
 
   if usuario.id not in blacklist:
     return await interaction.response.send_message(
@@ -663,7 +748,12 @@ async def desbloquear(
     )
 
   blacklist.remove(usuario.id)
-  salvar_blacklist(blacklist)
+  try:
+    salvar_blacklist(blacklist)
+  except BlacklistError:
+    return await interaction.response.send_message(
+        "⚠️ Não foi possível salvar a lista de bloqueio.", ephemeral=True
+    )
 
   await interaction.response.send_message(
       f"✅ O usuário {usuario.mention} foi **desbloqueado** dos comandos do bot.",
@@ -692,9 +782,10 @@ def migrate_legacy_economy_database(
     )
     os.close(temporary_descriptor)
     try:
-        with closing(sqlite3.connect(legacy_database_path)) as source:
-            with closing(sqlite3.connect(temporary_path)) as destination:
-                source.backup(destination)
+        with closing(sqlite3.connect(legacy_database_path)) as source, closing(
+            sqlite3.connect(temporary_path)
+        ) as destination:
+            source.backup(destination)
         os.replace(temporary_path, database_path)
     finally:
         if os.path.exists(temporary_path):
@@ -1124,7 +1215,7 @@ def prestige_player(user_id: int) -> tuple[str, int, int, int, int]:
             "SELECT prestige_points FROM economy_accounts WHERE user_id = ?",
             (user_id,),
         ).fetchone()[0]
-        if user_id == BOT_BOT_OWNER_ID:
+        if user_id == BOT_OWNER_ID:
             return "house_owner", balance, prestige_level, points, 0
         active_bet = connection.execute(
             "SELECT 1 FROM house_bet_reservations WHERE user_id = ? LIMIT 1",
@@ -1178,7 +1269,7 @@ def purchase_prestige_upgrade(
             """,
             (user_id,),
         ).fetchone()
-        if user_id == BOT_BOT_OWNER_ID:
+        if user_id == BOT_OWNER_ID:
             return "house_owner", points, level, 0
         if connection.execute(
             "SELECT 1 FROM house_bet_reservations WHERE user_id = ? LIMIT 1",
@@ -1253,16 +1344,16 @@ def get_player_bet_limit(user_id: int) -> int:
     return PLAYER_BASE_BET_LIMIT + level * PLAYER_BET_LIMIT_PER_UPGRADE
 
 
-def set_house_BOT_OWNER_ID(BOT_OWNER_ID: int) -> None:
-    if BOT_OWNER_ID != BOT_BOT_OWNER_ID:
-        raise ValueError("O proprietário da casa principal é definido pelo BOT_BOT_OWNER_ID.")
+def set_house_BOT_OWNER_ID(owner_id: int) -> None:
+    if owner_id != BOT_OWNER_ID:
+        raise ValueError("O proprietário da casa principal é definido pelo BOT_OWNER_ID.")
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute(
             """
             INSERT INTO casino_settings (setting, value) VALUES ('house_BOT_OWNER_ID', ?)
             ON CONFLICT(setting) DO UPDATE SET value = excluded.value
             """,
-            (BOT_OWNER_ID,),
+            (owner_id,),
         )
         connection.execute(
             """
@@ -1272,12 +1363,12 @@ def set_house_BOT_OWNER_ID(BOT_OWNER_ID: int) -> None:
                 AND economy_accounts.total_earned = 0
                 AND economy_accounts.total_lost = 0
             """,
-            (BOT_OWNER_ID, MAIN_HOUSE_STARTING_BALANCE),
+            (owner_id, MAIN_HOUSE_STARTING_BALANCE),
         )
 
 
 def get_house_BOT_OWNER_ID() -> int:
-    return BOT_BOT_OWNER_ID
+    return BOT_OWNER_ID
 
 
 def increment_house_stat(
@@ -1331,7 +1422,7 @@ def get_main_house_status() -> dict[str, int]:
             SELECT balance, total_earned, total_lost
             FROM economy_accounts WHERE user_id = ?
             """,
-            (BOT_BOT_OWNER_ID,),
+            (BOT_OWNER_ID,),
         ).fetchone()
         house_stats = dict(
             connection.execute(
@@ -1357,7 +1448,7 @@ def get_main_house_status() -> dict[str, int]:
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
             WHERE house_BOT_OWNER_ID = ?
             """,
-            (BOT_BOT_OWNER_ID,),
+            (BOT_OWNER_ID,),
         ).fetchone()[0]
         casino_count, local_treasury = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(treasury), 0) FROM guild_casinos"
@@ -1468,7 +1559,7 @@ def upgrade_main_house(
     expected_level: int | None = None,
     expected_npc_count: int | None = None,
 ) -> tuple[str, int, int, int, int]:
-    if user_id != BOT_BOT_OWNER_ID:
+    if user_id != BOT_OWNER_ID:
         return "not_owner", 0, 0, 0, 0
     if upgrade_type not in {"npc_count", "npc_bet"}:
         raise ValueError(f"Tipo de upgrade da casa principal inválido: {upgrade_type}")
@@ -1619,6 +1710,43 @@ def payout_for_target_rtp(
     if payout_numerator <= 0:
         raise ValueError("O retorno esperado precisa ser positivo.")
     return bet * payout_numerator // (100 * winning_outcomes)
+
+
+SCRATCH_SYMBOLS = ("CEREJA", "LIMAO", "SINO", "ESTRELA", "DIAMANTE")
+
+
+def play_scratchcard(bet: int) -> tuple[list[str], int, str]:
+    symbols = random.choices(SCRATCH_SYMBOLS, k=3)
+    if len(set(symbols)) == 1:
+        return symbols, bet * 10, "trinca"
+    if len(set(symbols)) == 2:
+        return symbols, bet * 23 // 20, "par"
+    return symbols, 0, "sem combinação"
+
+
+def play_mines(bet: int, safe_picks: int) -> tuple[list[int], set[int], int]:
+    if not 1 <= safe_picks <= 5:
+        raise ValueError("A quantidade de casas seguras deve estar entre 1 e 5.")
+    mines = set(random.sample(range(9), 2))
+    opened: list[int] = []
+    for tile in random.sample(range(9), 9):
+        opened.append(tile)
+        if tile in mines:
+            break
+        if len(opened) == safe_picks:
+            break
+
+    if opened[-1] in mines:
+        return opened, mines, 0
+
+    winning_outcomes = math.comb(7, safe_picks)
+    total_outcomes = math.comb(9, safe_picks)
+    fair_payout = payout_for_target_rtp(
+        bet,
+        winning_outcomes,
+        total_outcomes,
+    )
+    return opened, mines, max(bet, fair_payout * 95 // 100)
 
 
 def render_bet_result_image(
@@ -1799,7 +1927,7 @@ async def send_bet_result(
             )
 
 
-class BetAgainView(discord.ui.View):
+class BetAgainView(BlacklistView):
     def __init__(
         self,
         user_id: int,
@@ -1816,6 +1944,8 @@ class BetAgainView(discord.ui.View):
         self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -1963,6 +2093,19 @@ async def repeat_bet(
         payout, combination, _ = slot_payout(reels, bet)
         choice_text = "Giro da máquina caça-níquel."
         result = f"Resultado: **{' | '.join(reels)}** — {combination}."
+    elif game == "raspadinha":
+        symbols, payout, combination = play_scratchcard(bet)
+        choice_text = "Raspadinha de tr\u00eas cart\u00f5es."
+        result = f"S\u00edmbolos revelados: **{' | '.join(symbols)}** \u2014 {combination}."
+    elif game == "campo_minado":
+        assert isinstance(choice, str)
+        safe_picks = int(choice)
+        opened_tiles, mine_positions, payout = play_mines(bet, safe_picks)
+        choice_text = f"Tentativas de abertura: **{safe_picks} casas**."
+        if payout:
+            result = f"Voc\u00ea abriu {safe_picks} casas sem encontrar uma mina."
+        else:
+            result = f"Uma mina apareceu na tentativa **{len(opened_tiles)}**. A aposta foi perdida."
     else:
         raise ValueError(f"Jogo de repetição desconhecido: {game}")
 
@@ -1988,6 +2131,23 @@ async def repeat_bet(
         animation = await asyncio.to_thread(render_slot_gif, reels, multiplier)
         file = discord.File(animation, filename="cacaniquel.gif")
         image_url = "attachment://cacaniquel.gif"
+    elif game == "raspadinha":
+        animation = await asyncio.to_thread(
+            render_scratchcard_gif,
+            symbols,
+            payout / bet,
+        )
+        file = discord.File(animation, filename="raspadinha.gif")
+        image_url = "attachment://raspadinha.gif"
+    elif game == "campo_minado":
+        animation = await asyncio.to_thread(
+            render_mines_gif,
+            opened_tiles,
+            mine_positions,
+            payout / bet,
+        )
+        file = discord.File(animation, filename="campo-minado.gif")
+        image_url = "attachment://campo-minado.gif"
     if game == "jogo_do_bixo":
         bet_status, balance, remaining = settle_animal_house_bet(
             interaction.user.id,
@@ -3700,14 +3860,14 @@ def reset_player_data(reset_type: str) -> tuple[int, int]:
                 UPDATE economy_accounts SET balance = 0
                 WHERE user_id != ? AND balance != 0
                 """,
-                (BOT_BOT_OWNER_ID,),
+                (BOT_OWNER_ID,),
             ).rowcount
             local_rows = connection.execute(
                 """
                 UPDATE guild_casino_accounts SET balance = 0
                 WHERE user_id != ? AND balance != 0
                 """,
-                (BOT_BOT_OWNER_ID,),
+                (BOT_OWNER_ID,),
             ).rowcount
             return global_rows, local_rows
 
@@ -3777,7 +3937,7 @@ def draw_blackjack_card() -> str:
     )[0]
 
 
-class BlackjackView(discord.ui.View):
+class BlackjackView(BlacklistView):
     def __init__(
         self,
         user: discord.User | discord.Member,
@@ -3808,6 +3968,8 @@ class BlackjackView(discord.ui.View):
         self.turn_lock = asyncio.Lock()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id != self.user.id:
             await interaction.response.send_message(
                 "Esta partida pertence a outra pessoa.",
@@ -4071,13 +4233,15 @@ class BlackjackView(discord.ui.View):
                 )
 
 
-class BlackjackAgainView(discord.ui.View):
+class BlackjackAgainView(BlacklistView):
     def __init__(self, user_id: int, bet: int) -> None:
         super().__init__(timeout=300)
         self.user_id = user_id
         self.bet = bet
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -4099,12 +4263,14 @@ class BlackjackAgainView(discord.ui.View):
         await repeat_blackjack(interaction, self.bet)
 
 
-class PrestigeConfirmView(discord.ui.View):
+class PrestigeConfirmView(BlacklistView):
     def __init__(self, user_id: int) -> None:
         super().__init__(timeout=60)
         self.user_id = user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -4159,13 +4325,15 @@ class PrestigeConfirmView(discord.ui.View):
         )
 
 
-class PrestigeUpgradeView(discord.ui.View):
+class PrestigeUpgradeView(BlacklistView):
     def __init__(self, user_id: int, upgrade_key: str) -> None:
         super().__init__(timeout=60)
         self.user_id = user_id
         self.upgrade_key = upgrade_key
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -4246,7 +4414,7 @@ class PrestigeUpgradeView(discord.ui.View):
         )
 
 
-class DeleteGuildCasinoView(discord.ui.View):
+class DeleteGuildCasinoView(BlacklistView):
     def __init__(
         self,
         guild_id: int,
@@ -4259,6 +4427,8 @@ class DeleteGuildCasinoView(discord.ui.View):
         self.casino_name = casino_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
@@ -4481,6 +4651,244 @@ def draw_slot_symbol(
             stroke_width=2 * scale,
             stroke_fill="#a72850",
         )
+
+
+def render_scratchcard_gif(
+    symbols: list[str],
+    multiplier: float,
+) -> io.BytesIO:
+    width, height = 600, 330
+    frames: list[Image.Image] = []
+    colors = {
+        "CEREJA": (231, 82, 103),
+        "LIMAO": (129, 205, 91),
+        "SINO": (246, 191, 76),
+        "ESTRELA": (100, 173, 245),
+        "DIAMANTE": (102, 221, 211),
+    }
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 27)
+        symbol_font = ImageFont.truetype(font_path, 19)
+        caption_font = ImageFont.truetype(font_path, 17)
+    except OSError:
+        title_font = ImageFont.load_default()
+        symbol_font = ImageFont.load_default()
+        caption_font = ImageFont.load_default()
+
+    for frame_index in range(18):
+        image = Image.new("RGB", (width, height), (18, 23, 48))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (24, 18, width - 24, height - 18),
+            radius=27,
+            fill=(35, 43, 74),
+            outline=(247, 201, 87),
+            width=4,
+        )
+        draw.text(
+            (width // 2, 53),
+            "RASP - RASPADINHA",
+            font=title_font,
+            fill=(255, 225, 150),
+            anchor="mm",
+        )
+        revealed_count = min(3, max(0, (frame_index - 2) // 4))
+        for index, center_x in enumerate((155, 300, 445)):
+            card = (center_x - 61, 91, center_x + 61, 231)
+            draw.rounded_rectangle(
+                card,
+                radius=18,
+                fill=(242, 239, 221),
+                outline=(255, 255, 255),
+                width=3,
+            )
+            if index < revealed_count:
+                color = colors[symbols[index]]
+                draw.ellipse(
+                    (center_x - 37, 113, center_x + 37, 187),
+                    fill=color,
+                    outline=(255, 255, 255),
+                    width=3,
+                )
+                draw.text(
+                    (center_x, 208),
+                    symbols[index],
+                    font=symbol_font,
+                    fill=(36, 43, 63),
+                    anchor="mm",
+                )
+            else:
+                draw.rounded_rectangle(
+                    (center_x - 52, 100, center_x + 52, 222),
+                    radius=13,
+                    fill=(143, 151, 169),
+                    outline=(220, 226, 238),
+                    width=2,
+                )
+                for hatch_y in range(107, 218, 15):
+                    draw.line(
+                        (center_x - 47, hatch_y, center_x + 47, hatch_y + 22),
+                        fill=(176, 183, 198),
+                        width=2,
+                    )
+                scratch_x = center_x - 39 + (frame_index * 17 % 78)
+                draw.line(
+                    (scratch_x, 110, scratch_x + 26, 208),
+                    fill=(255, 236, 177),
+                    width=5,
+                )
+
+        if revealed_count == 3:
+            label = f"PREMIO  x{multiplier:g}" if multiplier > 1 else (
+                "APOSTA DEVOLVIDA" if multiplier == 1 else "SEM PREMIO"
+            )
+            accent = (83, 216, 154) if multiplier > 1 else (
+                (247, 201, 87) if multiplier == 1 else (205, 211, 228)
+            )
+            draw.rounded_rectangle(
+                (170, 252, 430, 296),
+                radius=18,
+                fill=(20, 26, 47),
+                outline=accent,
+                width=2,
+            )
+            draw.text(
+                (width // 2, 274),
+                label,
+                font=caption_font,
+                fill=accent,
+                anchor="mm",
+            )
+        else:
+            draw.text(
+                (width // 2, 274),
+                "RASPE OS CARTOES...",
+                font=caption_font,
+                fill=(213, 221, 241),
+                anchor="mm",
+            )
+        frames.append(image)
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[75] * (len(frames) - 1) + [1200],
+        optimize=False,
+        disposal=2,
+    )
+    output.seek(0)
+    return output
+
+
+def render_mines_gif(
+    opened_tiles: list[int],
+    mine_positions: set[int],
+    multiplier: float,
+) -> io.BytesIO:
+    width, height = 560, 360
+    frames: list[Image.Image] = []
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 27)
+        tile_font = ImageFont.truetype(font_path, 24)
+        caption_font = ImageFont.truetype(font_path, 17)
+    except OSError:
+        title_font = ImageFont.load_default()
+        tile_font = ImageFont.load_default()
+        caption_font = ImageFont.load_default()
+
+    steps = [opened_tiles[:index] for index in range(1, len(opened_tiles) + 1)]
+    steps.append(opened_tiles)
+    for frame_index, visible_tiles in enumerate(steps):
+        final_frame = frame_index == len(steps) - 1
+        visible = set(visible_tiles)
+        hit_mine = bool(visible & mine_positions)
+        image = Image.new("RGB", (width, height), (18, 23, 48))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (22, 16, width - 22, height - 16),
+            radius=26,
+            fill=(35, 43, 74),
+            outline=(247, 201, 87),
+            width=4,
+        )
+        draw.text(
+            (width // 2, 48),
+            "CAMPO MINADO",
+            font=title_font,
+            fill=(255, 225, 150),
+            anchor="mm",
+        )
+        for tile in range(9):
+            column, row = tile % 3, tile // 3
+            left = 145 + column * 91
+            top = 80 + row * 75
+            bounds = (left, top, left + 68, top + 58)
+            is_mine = tile in mine_positions
+            is_revealed = tile in visible
+            show_mine = is_mine and (is_revealed or final_frame)
+            fill = (
+                (185, 61, 77)
+                if show_mine
+                else (54, 168, 119)
+                if is_revealed
+                else (68, 83, 119)
+            )
+            draw.rounded_rectangle(
+                bounds,
+                radius=12,
+                fill=fill,
+                outline=(226, 232, 245),
+                width=2,
+            )
+            if show_mine:
+                label = "X"
+            elif is_revealed:
+                label = "O"
+            else:
+                label = "O"
+            draw.text(
+                (left + 34, top + 29),
+                label,
+                font=tile_font,
+                fill=(255, 255, 255),
+                anchor="mm",
+            )
+        if final_frame:
+            label = f"PREMIO  x{multiplier:g}" if multiplier > 1 else (
+                "VOCE ACHOU UMA MINA" if hit_mine else "APOSTA DEVOLVIDA"
+            )
+            accent = (83, 216, 154) if multiplier > 1 else (
+                (235, 92, 105) if hit_mine else (247, 201, 87)
+            )
+        else:
+            label = "PROCURANDO CASAS SEGURAS..."
+            accent = (213, 221, 241)
+        draw.text(
+            (width // 2, 323),
+            label,
+            font=caption_font,
+            fill=accent,
+            anchor="mm",
+        )
+        frames.append(image)
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[230] * (len(frames) - 1) + [1200],
+        optimize=False,
+        disposal=2,
+    )
+    output.seek(0)
+    return output
 
 
 def render_slot_gif(reels: list[str], multiplier: float) -> io.BytesIO:
@@ -4805,6 +5213,11 @@ def set_last_announced_update(message: str) -> None:
         )
 
 
+# Os comandos de blacklist foram registrados antes de a classe final do bot
+# estar definida. Guarde a árvore temporária para transferi-los ao bot ativo.
+legacy_bot = bot
+
+
 class BotDiscord(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -4812,24 +5225,14 @@ class BotDiscord(discord.Client):
         intents.members = True
         intents.presences = True
         super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
+        self.tree = BlacklistCommandTree(self)
         self.house_BOT_OWNER_ID: int | None = None
         self.npc_betting_task: asyncio.Task[None] | None = None
-        self.pending_update_announcement: str | None = None
 
     async def setup_hook(self) -> None:
-        self.house_BOT_OWNER_ID = BOT_BOT_OWNER_ID
+        self.house_BOT_OWNER_ID = BOT_OWNER_ID
         set_house_BOT_OWNER_ID(self.house_BOT_OWNER_ID)
 
-        try:
-            previous_update = get_last_announced_update()
-        except sqlite3.Error:
-            logger.exception(
-                "Não foi possível carregar o estado dos anúncios de atualização."
-            )
-            previous_update = None
-        if previous_update != UPDATE_ANNOUNCEMENT_MESSAGE:
-            self.pending_update_announcement = UPDATE_ANNOUNCEMENT_MESSAGE
 
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
@@ -4849,8 +5252,6 @@ class BotDiscord(discord.Client):
     async def on_ready(self) -> None:
         if self.user is not None:
             logger.info("Bot conectado como %s (%s).", self.user, self.user.id)
-        if self.pending_update_announcement is not None:
-            await self.announce_update(self.pending_update_announcement)
         if self.npc_betting_task is None or self.npc_betting_task.done():
             self.npc_betting_task = asyncio.create_task(
                 self.npc_betting_loop(),
@@ -4858,13 +5259,10 @@ class BotDiscord(discord.Client):
             )
 
     async def announce_update(self, message: str) -> bool:
-        published = await self.publish_update_message(
+        return await self.publish_update_message(
             message,
             mention_role=True,
         )
-        if published and self.pending_update_announcement == message:
-            self.pending_update_announcement = None
-        return published
 
     async def publish_update_message(
         self,
@@ -4904,7 +5302,7 @@ class BotDiscord(discord.Client):
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
-        embed.set_footer(text="Atualização automática do bot")
+        embed.set_footer(text="Atualização manual do bot")
         try:
             await channel.send(
                 content=(
@@ -4952,7 +5350,7 @@ class BotDiscord(discord.Client):
                     for guild in self.guilds
                 }
                 main_house_online = any(
-                    BOT_BOT_OWNER_ID in BOT_OWNER_IDs
+                    BOT_OWNER_ID in BOT_OWNER_IDs
                     for BOT_OWNER_IDs in online_BOT_OWNER_IDs_by_guild.values()
                 )
                 main_bets, local_bets = run_npc_betting_cycle(
@@ -4972,6 +5370,8 @@ class BotDiscord(discord.Client):
 
 
 bot = BotDiscord()
+for command in legacy_bot.tree.get_commands():
+    bot.tree.add_command(command)
 
 
 async def synchronize_user_autoroles(user_id: int) -> None:
@@ -5009,7 +5409,7 @@ async def on_app_command_completion(
     await synchronize_casino_autoroles(guild, triggering_member=member)
 
 
-class DuelView(discord.ui.View):
+class DuelView(BlacklistView):
     def __init__(
         self,
         challenger: discord.User | discord.Member,
@@ -5134,6 +5534,8 @@ class DuelView(discord.ui.View):
         self.stop()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id not in (self.challenger.id, self.opponent.id):
             await interaction.response.send_message(
                 "Este desafio é privado entre os dois jogadores mencionados.",
@@ -5423,7 +5825,7 @@ class DuelView(discord.ui.View):
                 )
 
 
-class DuelAgainView(discord.ui.View):
+class DuelAgainView(BlacklistView):
     def __init__(
         self,
         challenger: discord.User | discord.Member,
@@ -5438,6 +5840,8 @@ class DuelAgainView(discord.ui.View):
         self.game = game
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id in (self.challenger.id, self.opponent.id):
             return True
         await interaction.response.send_message(
@@ -5476,7 +5880,7 @@ class DuelAgainView(discord.ui.View):
 
 
 async def is_bot_owner(interaction: discord.Interaction) -> bool:
-    return interaction.user.id == BOT_BOT_OWNER_ID
+    return interaction.user.id == BOT_OWNER_ID
 
 
 def violates_moderation_hierarchy(
@@ -5500,7 +5904,7 @@ def violates_moderation_hierarchy(
     description="Reinicie seus saldos em troca de bônus permanentes.",
 )
 async def prestigio(interaction: discord.Interaction) -> None:
-    if interaction.user.id == BOT_BOT_OWNER_ID:
+    if interaction.user.id == BOT_OWNER_ID:
         await interaction.response.send_message(
             "A conta do owner representa o saldo da casa principal e não pode "
             "ser prestigada.",
@@ -5575,7 +5979,7 @@ async def upgrade_prestigio(
     interaction: discord.Interaction,
     upgrade: app_commands.Choice[str],
 ) -> None:
-    if interaction.user.id == BOT_BOT_OWNER_ID:
+    if interaction.user.id == BOT_OWNER_ID:
         await interaction.response.send_message(
             "A casa principal não usa a árvore de upgrades de prestígio dos jogadores.",
             ephemeral=True,
@@ -5685,7 +6089,7 @@ async def saldo(interaction: discord.Interaction) -> None:
     )
 
 
-class JobSelectView(discord.ui.View):
+class JobSelectView(BlacklistView):
     def __init__(self, user_id: int) -> None:
         super().__init__(timeout=120)
         self.user_id = user_id
@@ -5704,6 +6108,8 @@ class JobSelectView(discord.ui.View):
         self.add_item(JobSelect(options))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -5914,14 +6320,16 @@ async def roubar(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
-class PlayerDataResetView(discord.ui.View):
+class PlayerDataResetView(BlacklistView):
     def __init__(self, BOT_OWNER_ID: int, reset_type: str) -> None:
         super().__init__(timeout=60)
         self.BOT_OWNER_ID = BOT_OWNER_ID
         self.reset_type = reset_type
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.BOT_OWNER_ID == BOT_BOT_OWNER_ID:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
+        if interaction.user.id == self.BOT_OWNER_ID == BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
             "Somente o owner do bot pode confirmar este reset.",
@@ -6375,7 +6783,7 @@ async def configurar_npcs_principais(
     )
 
 
-class MainHouseUpgradeView(discord.ui.View):
+class MainHouseUpgradeView(BlacklistView):
     def __init__(
         self,
         user_id: int,
@@ -7343,7 +7751,7 @@ def create_guild_casino_upgrade_embed(
     cost = CASINO_UPGRADE_COSTS[level]
     next_level = level + 1
     unlocked_games = [
-        game
+        CASINO_GAME_DISPLAY_NAMES.get(game, game)
         for game, required_level in CASINO_GAME_UNLOCKS.items()
         if required_level == next_level
     ]
@@ -7371,7 +7779,7 @@ def create_guild_casino_upgrade_embed(
     return embed
 
 
-class GuildCasinoUpgradeView(discord.ui.View):
+class GuildCasinoUpgradeView(BlacklistView):
     def __init__(self, guild_id: int, BOT_OWNER_ID: int, expected_level: int) -> None:
         super().__init__(timeout=120)
         self.guild_id = guild_id
@@ -7379,6 +7787,8 @@ class GuildCasinoUpgradeView(discord.ui.View):
         self.expected_level = expected_level
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await verificar_usuario_bloqueado(interaction):
+            return False
         if interaction.user.id == self.BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
@@ -7406,7 +7816,7 @@ class GuildCasinoUpgradeView(discord.ui.View):
             casino = get_guild_casino(self.guild_id)
             currency_name = casino[2] if casino is not None else "moedas"
             unlocked_games = [
-                game
+                CASINO_GAME_DISPLAY_NAMES.get(game, game)
                 for game, required_level in CASINO_GAME_UNLOCKS.items()
                 if required_level == level
             ]
@@ -7543,8 +7953,9 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
     aposta="Quantidade de moedas locais para apostar.",
     jogo="Escolha um jogo já liberado pelo cassino.",
     escolha=(
-        "Cara/coroa, par/ímpar, número, cor, maior/menor ou "
-        "pedra/papel/tesoura."
+        "Cara/coroa, par ou impar, numero, cor, maior/menor ou "
+        "pedra/papel/tesoura. Campo Minado: 1 a 5 casas seguras; "
+        "Raspadinha nao usa escolha."
     ),
 )
 @app_commands.choices(
@@ -7555,6 +7966,8 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
         app_commands.Choice(name="Maior ou menor", value="maior_menor"),
         app_commands.Choice(name="Caça-níquel", value="cacaniquel"),
         app_commands.Choice(name="Jokenpô", value="jokenpo"),
+        app_commands.Choice(name="Campo Minado", value="campo_minado"),
+        app_commands.Choice(name="Raspadinha", value="raspadinha"),
     ]
 )
 async def jogar_cassino(
@@ -7701,6 +8114,26 @@ async def jogar_cassino(
             payout = 0
             result = f"A casa venceu: **{drawn}** vence **{normalized_choice}**."
         choice_text = f"Escolha: **{normalized_choice}**."
+    elif jogo.value == "campo_minado":
+        normalized_choice = (escolha or "").strip()
+        if not normalized_choice.isdecimal() or not 1 <= int(normalized_choice) <= 5:
+            await interaction.response.send_message(
+                "Para Campo Minado, escolha de 1 a 5 casas seguras em `escolha`.",
+                ephemeral=True,
+            )
+            return
+        safe_picks = int(normalized_choice)
+        opened_tiles, mine_positions, payout = play_mines(aposta, safe_picks)
+        choice_text = f"Tentativas: **{safe_picks} casas seguras**."
+        if payout:
+            result = f"Voce abriu {safe_picks} casas sem encontrar uma mina."
+        else:
+            result = f"Uma mina apareceu na tentativa **{len(opened_tiles)}**. A aposta foi perdida."
+    elif jogo.value == "raspadinha":
+        symbols, payout, combination = play_scratchcard(aposta)
+        normalized_choice = "raspadinha"
+        choice_text = "Raspadinha de tres cartoes."
+        result = f"Simbolos revelados: **{' | '.join(symbols)}** - {combination}."
     else:
         reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
         payout, combination, _ = slot_payout(reels, aposta)
@@ -7728,6 +8161,23 @@ async def jogar_cassino(
         )
         result_file = discord.File(animation, filename="roleta.gif")
         result_image_url = "attachment://roleta.gif"
+    elif jogo.value == "campo_minado":
+        animation = await asyncio.to_thread(
+            render_mines_gif,
+            opened_tiles,
+            mine_positions,
+            payout / aposta,
+        )
+        result_file = discord.File(animation, filename="campo-minado.gif")
+        result_image_url = "attachment://campo-minado.gif"
+    elif jogo.value == "raspadinha":
+        animation = await asyncio.to_thread(
+            render_scratchcard_gif,
+            symbols,
+            payout / aposta,
+        )
+        result_file = discord.File(animation, filename="raspadinha.gif")
+        result_image_url = "attachment://raspadinha.gif"
     settlement = settle_guild_casino_bet(
         guild.id,
         interaction.user.id,
@@ -7745,7 +8195,7 @@ async def jogar_cassino(
         return
     if status == "insufficient_treasury":
         await interaction.response.send_message(
-            f"O caixa do cassino não consegue cobrir esse prêmio; "
+            "O caixa do cassino não consegue cobrir esse prêmio; "
             "a aposta foi cancelada e seu saldo não mudou.",
             ephemeral=True,
         )
@@ -7830,7 +8280,7 @@ async def cacaniquel(
         color = discord.Color.gold()
     else:
         outcome = f"**{combination}.**"
-        result_title = "😿 SEM PRÊMIO"
+        result_title = "😿 SEM PREMIO"
         net_change = -aposta
         color = discord.Color.red()
 
@@ -8397,6 +8847,124 @@ async def jokenpo(
 
 
 @bot.tree.command(
+    name="raspadinha",
+    description="Raspe tres simbolos e tente encontrar uma combinacao premiada.",
+)
+@app_commands.guild_only()
+@app_commands.describe(aposta="Quantidade de moedas para apostar.")
+async def raspadinha(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, aposta):
+        return
+
+    symbols, payout, combination = play_scratchcard(aposta)
+    payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    animation = await asyncio.to_thread(
+        render_scratchcard_gif,
+        symbols,
+        payout / aposta,
+    )
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_BOT_OWNER_ID(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca sem fundos. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="RASPADINHA",
+        bet=aposta,
+        choice="Raspadinha de tres cartoes.",
+        result=f"Simbolos revelados: **{' | '.join(symbols)}** - {combination}.",
+        payout=payout,
+        balance=balance,
+        file=discord.File(animation, filename="raspadinha.gif"),
+        image_url="attachment://raspadinha.gif",
+        view=BetAgainView(interaction.user.id, "raspadinha", aposta, "girar"),
+    )
+
+
+@bot.tree.command(
+    name="campo_minado",
+    description="Abra de 1 a 5 casas seguras sem encontrar uma mina.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    aposta="Quantidade de moedas para apostar.",
+    casas_para_abrir="Quantas casas voce quer tentar abrir: de 1 a 5.",
+)
+async def campo_minado(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
+    casas_para_abrir: app_commands.Range[int, 1, 5],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, aposta):
+        return
+
+    opened_tiles, mine_positions, payout = play_mines(aposta, casas_para_abrir)
+    payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    animation = await asyncio.to_thread(
+        render_mines_gif,
+        opened_tiles,
+        mine_positions,
+        payout / aposta,
+    )
+    if payout:
+        result = f"Voce abriu {casas_para_abrir} casas sem encontrar uma mina."
+    else:
+        result = f"Uma mina apareceu na tentativa **{len(opened_tiles)}**. A aposta foi perdida."
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_BOT_OWNER_ID(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca sem fundos. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="CAMPO MINADO",
+        bet=aposta,
+        choice=f"Tentativas de abertura: **{casas_para_abrir} casas**.",
+        result=result,
+        payout=payout,
+        balance=balance,
+        file=discord.File(animation, filename="campo-minado.gif"),
+        image_url="attachment://campo-minado.gif",
+        view=BetAgainView(
+            interaction.user.id,
+            "campo_minado",
+            aposta,
+            str(casas_para_abrir),
+        ),
+    )
+
+
+@bot.tree.command(
     name="duelo",
     description="Desafie alguém para dados ou jokenpô apostando moedas.",
 )
@@ -8881,7 +9449,8 @@ async def ajuda(interaction: discord.Interaction) -> None:
             "🎲 Jogos de aposta",
             {
                 "moeda", "dados", "roleta", "jogo_do_bixo", "cacaniquel",
-                "maior_menor", "jokenpo", "duelo", "blackjack",
+                "maior_menor", "jokenpo", "campo_minado", "raspadinha",
+                "duelo", "blackjack",
             },
         ),
         (
@@ -9162,4 +9731,8 @@ async def on_app_command_error(
         await interaction.response.send_message(message, ephemeral=True)
 
 
-bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Defina a variável de ambiente DISCORD_BOT_TOKEN antes de iniciar o bot.")
+    bot.run(token)
