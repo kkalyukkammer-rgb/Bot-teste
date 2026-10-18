@@ -34,6 +34,12 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/daily`: 3% do saldo atual, com minimo de 100 moedas.\n"
     "`/weekly`: 8% do saldo atual, com minimo de 1.000 moedas.\n"
     "`/monthly`: 13% do saldo atual, com minimo de 10.000 moedas.\n\n"
+    "**PAGAMENTOS DOS JOGOS**\n\n"
+    "`/dados`: par/impar retorna x1,75; numero exato retorna x2,5.\n"
+    "`/jogar_cassino` permite escolher a casa principal (saldo global) ou o cassino deste servidor (saldo local).\n"
+    "`/moeda`: retorno base x2. `/roleta`: vermelho/preto aprox. x2,06; zero x37.\n"
+    "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
+    "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 15 segundos.\n"
     "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
@@ -1980,6 +1986,12 @@ def payout_for_target_rtp(
     return bet * payout_numerator // (100 * winning_outcomes)
 
 
+def payout_for_multiplier(bet: int, multiplier_numerator: int) -> int:
+    if bet <= 0 or multiplier_numerator <= 0:
+        raise ValueError("A aposta e o multiplicador precisam ser positivos.")
+    return bet * multiplier_numerator // 100
+
+
 SCRATCH_SYMBOLS = ("CEREJA", "LIMAO", "SINO", "ESTRELA", "DIAMANTE")
 
 
@@ -2283,10 +2295,10 @@ async def repeat_bet(
         assert isinstance(choice, str)
         if choice in ("par", "ímpar"):
             won = ("par" if roll % 2 == 0 else "ímpar") == choice
-            payout = payout_for_target_rtp(bet, 3, 6) if won else 0
+            payout = payout_for_multiplier(bet, 175) if won else 0
         else:
             won = roll == int(choice)
-            payout = payout_for_target_rtp(bet, 1, 6) if won else 0
+            payout = payout_for_multiplier(bet, 250) if won else 0
         choice_text = f"Você escolheu **{choice.capitalize()}**."
         result = f"O dado caiu em **{roll}**."
     elif game == "roleta":
@@ -8330,21 +8342,22 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
 @app_commands.guild_only()
 @app_commands.describe(
     aposta="Quantidade de moedas locais para apostar.",
-    jogo="Escolha um jogo já liberado pelo cassino.",
-    escolha=(
-        "Cara/coroa, par ou impar, numero, cor, maior/menor ou "
-        "pedra/papel/tesoura. Campo Minado: 1 a 5 casas seguras; "
-        "Raspadinha nao usa escolha."
-    ),
+    cassino="Escolha entre a casa principal e o cassino deste servidor.",
+    jogo="Escolha um jogo liberado pelo cassino.",
+    escolha="Dados: par/impar x1,75; numero exato x2,5. Nos outros jogos, informe a escolha valida.",
 )
 @app_commands.choices(
+    cassino=[
+        app_commands.Choice(name="Cassino principal (saldo global)", value="principal"),
+        app_commands.Choice(name="Cassino deste servidor (saldo local)", value="local"),
+    ],
     jogo=[
         app_commands.Choice(name="Cara ou coroa", value="moeda"),
         app_commands.Choice(name="Dados", value="dados"),
         app_commands.Choice(name="Roleta", value="roleta"),
         app_commands.Choice(name="Maior ou menor", value="maior_menor"),
-        app_commands.Choice(name="Caça-níquel", value="cacaniquel"),
-        app_commands.Choice(name="Jokenpô", value="jokenpo"),
+        app_commands.Choice(name="Caca-niqueis", value="cacaniquel"),
+        app_commands.Choice(name="Jokenpo", value="jokenpo"),
         app_commands.Choice(name="Campo Minado", value="campo_minado"),
         app_commands.Choice(name="Raspadinha", value="raspadinha"),
     ]
@@ -8352,6 +8365,7 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
 async def jogar_cassino(
     interaction: discord.Interaction,
     aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
+    cassino: app_commands.Choice[str],
     jogo: app_commands.Choice[str],
     escolha: str | None = None,
 ) -> None:
@@ -8360,23 +8374,40 @@ async def jogar_cassino(
     if not await ensure_bet_limit(interaction, aposta):
         return
     guild = interaction.guild
-    casino = get_guild_casino(guild.id) if guild is not None else None
-    if casino is None or guild is None:
+    if guild is None:
         await interaction.response.send_message(
-            "Este servidor ainda não tem um cassino. Use `/criar_cassino`.",
-            ephemeral=True,
-        )
-        return
-    _, name, currency_name, _, upgrade_level = casino
-    required_level = CASINO_GAME_UNLOCKS[jogo.value]
-    if upgrade_level < required_level:
-        await interaction.response.send_message(
-            f"**{jogo.name}** ainda está bloqueado. O cassino precisa "
-            f"chegar ao nível **{required_level}**.",
+            "Este comando so pode ser usado em um servidor.",
             ephemeral=True,
         )
         return
 
+    use_main_casino = cassino.value == "principal"
+    if use_main_casino:
+        if not await ensure_not_house_owner(interaction):
+            return
+        casino = None
+        casino_name = "Cassino principal"
+        currency_name = "moedas"
+        upgrade_level = None
+    else:
+        casino = get_guild_casino(guild.id)
+        if casino is None:
+            await interaction.response.send_message(
+                "Este servidor ainda nao tem um cassino. Use `/criar_cassino`.",
+                ephemeral=True,
+            )
+            return
+        _, casino_name, currency_name, _, upgrade_level = casino
+
+    if not use_main_casino and upgrade_level is not None:
+        required_level = CASINO_GAME_UNLOCKS[jogo.value]
+        if upgrade_level < required_level:
+            await interaction.response.send_message(
+                f"**{jogo.name}** ainda esta bloqueado. O cassino precisa "
+                f"chegar ao nivel **{required_level}**.",
+                ephemeral=True,
+            )
+            return
     drawn = ""
     normalized_choice = ""
     if jogo.value == "moeda":
@@ -8409,11 +8440,11 @@ async def jogar_cassino(
         if normalized_choice in ("par", "ímpar"):
             drawn = "par" if roll % 2 == 0 else "ímpar"
             won = drawn == normalized_choice
-            payout = payout_for_target_rtp(aposta, 3, 6) if won else 0
+            payout = payout_for_multiplier(aposta, 175) if won else 0
         else:
             drawn = str(roll)
             won = roll == int(normalized_choice)
-            payout = payout_for_target_rtp(aposta, 1, 6) if won else 0
+            payout = payout_for_multiplier(aposta, 250) if won else 0
         choice_text = f"Escolha: **{normalized_choice}**."
         result = f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'})."
     elif jogo.value == "roleta":
@@ -8557,38 +8588,56 @@ async def jogar_cassino(
         )
         result_file = discord.File(animation, filename="raspadinha.gif")
         result_image_url = "attachment://raspadinha.gif"
-    settlement = settle_guild_casino_bet(
-        guild.id,
-        interaction.user.id,
-        get_house_BOT_OWNER_ID(),
-        aposta,
-        payout,
-    )
-    status, balance, treasury, tax_percent, tax = settlement
-    if status == "insufficient_player":
-        await interaction.response.send_message(
-            f"Saldo insuficiente em **{currency_name}**. "
-            f"Você tem {format_coins(balance)}.",
-            ephemeral=True,
+    selected_guild_id = None if use_main_casino else guild.id
+    if use_main_casino:
+        settled, balance, _ = settle_house_bet(
+            interaction.user.id,
+            get_house_BOT_OWNER_ID(),
+            aposta,
+            payout,
         )
-        return
-    if status == "insufficient_treasury":
-        await interaction.response.send_message(
-            "O caixa do cassino não consegue cobrir esse prêmio; "
-            "a aposta foi cancelada e seu saldo não mudou.",
-            ephemeral=True,
+        if not settled:
+            await interaction.response.send_message(
+                "A aposta foi cancelada: saldo insuficiente ou banca principal sem fundos para cobrir o premio.",
+                ephemeral=True,
+            )
+            return
+        tax_percent = None
+        tax = 0
+        treasury = None
+        result_casino_name = None
+    else:
+        settlement = settle_guild_casino_bet(
+            guild.id,
+            interaction.user.id,
+            get_house_BOT_OWNER_ID(),
+            aposta,
+            payout,
         )
-        return
-    if status != "settled":
-        await interaction.response.send_message(
-            "Não foi possível concluir a aposta porque o cassino não está disponível.",
-            ephemeral=True,
-        )
-        return
+        status, balance, treasury, tax_percent, tax = settlement
+        if status == "insufficient_player":
+            await interaction.response.send_message(
+                f"Saldo insuficiente em **{currency_name}**. Voce tem {format_coins(balance)}.",
+                ephemeral=True,
+            )
+            return
+        if status == "insufficient_treasury":
+            await interaction.response.send_message(
+                "O caixa do cassino nao consegue cobrir esse premio; a aposta foi cancelada e seu saldo nao mudou.",
+                ephemeral=True,
+            )
+            return
+        if status != "settled":
+            await interaction.response.send_message(
+                "Nao foi possivel concluir a aposta porque o cassino nao esta disponivel.",
+                ephemeral=True,
+            )
+            return
+        result_casino_name = casino_name
 
     await send_bet_result(
         interaction,
-        game=name,
+        game=casino_name,
         bet=aposta,
         choice=choice_text,
         result=result,
@@ -8601,15 +8650,14 @@ async def jogar_cassino(
             jogo.value,
             aposta,
             normalized_choice if jogo.value != "cacaniquel" else "giro",
-            guild_id=guild.id,
+            guild_id=selected_guild_id,
         ),
         currency_name=currency_name,
-        casino_name=name,
+        casino_name=result_casino_name,
         tax_percent=tax_percent,
         tax_amount=tax,
         treasury=treasury,
     )
-
 
 @bot.tree.command(name="cacaniquel", description="Gire a máquina caça-níquel usando suas moedas.")
 @app_commands.guild_only()
@@ -8863,7 +8911,7 @@ async def jogo_do_bixo(
     )
 
 
-@bot.tree.command(name="moeda", description="Aposte em cara ou coroa com retorno de 1,9x.")
+@bot.tree.command(name="moeda", description="Aposte em cara ou coroa; retorno base x2,0.")
 @app_commands.guild_only()
 @app_commands.describe(aposta="Quantidade de moedas para apostar.")
 @app_commands.choices(
@@ -8923,15 +8971,15 @@ async def moeda(
     )
 
 
-@bot.tree.command(name="dados", description="Aposte em par, ímpar ou no valor exato de um dado.")
+@bot.tree.command(name="dados", description="Aposte nos dados: par ou impar retorna x1,75; numero exato x2,5.")
 @app_commands.guild_only()
-@app_commands.describe(aposta="Quantidade de moedas para apostar.")
+@app_commands.describe(aposta="Quantidade de moedas para apostar.", escolha="Multiplicadores base; bonus de prestigio pode aumentar o lucro.")
 @app_commands.choices(
     escolha=[
-        app_commands.Choice(name="Par (retorno x1,9)", value="par"),
-        app_commands.Choice(name="Ímpar (retorno x1,9)", value="ímpar"),
+        app_commands.Choice(name="Par (base x1,75)", value="par"),
+        app_commands.Choice(name="Impar (base x1,75)", value="\u00edmpar"),
         *[
-            app_commands.Choice(name=f"Número {number} (retorno x5,7)", value=str(number))
+            app_commands.Choice(name=f"Numero {number} (base x2,5)", value=str(number))
             for number in range(1, 7)
         ],
     ]
@@ -8951,10 +8999,10 @@ async def dados(
     roll = random.randint(1, 6)
     if escolha.value in ("par", "ímpar"):
         won = ("par" if roll % 2 == 0 else "ímpar") == escolha.value
-        payout = payout_for_target_rtp(aposta, 3, 6) if won else 0
+        payout = payout_for_multiplier(aposta, 175) if won else 0
     else:
         won = roll == int(escolha.value)
-        payout = payout_for_target_rtp(aposta, 1, 6) if won else 0
+        payout = payout_for_multiplier(aposta, 250) if won else 0
 
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     animation = await asyncio.to_thread(render_dice_gif, roll)
@@ -8997,9 +9045,9 @@ async def dados(
 @app_commands.describe(aposta="Quantidade de moedas para apostar.")
 @app_commands.choices(
     cor=[
-        app_commands.Choice(name="Vermelho (retorno x1,95)", value="vermelho"),
-        app_commands.Choice(name="Preto (retorno x1,95)", value="preto"),
-        app_commands.Choice(name="Verde / zero (retorno x35,15)", value="verde"),
+        app_commands.Choice(name="Vermelho (base aprox. x2,06)", value="vermelho"),
+        app_commands.Choice(name="Preto (base aprox. x2,06)", value="preto"),
+        app_commands.Choice(name="Verde / zero (base x37)", value="verde"),
     ]
 )
 async def roleta(
@@ -9079,8 +9127,8 @@ async def roleta(
 )
 @app_commands.choices(
     escolha=[
-        app_commands.Choice(name="Maior que 7 (retorno x1,89)", value="maior"),
-        app_commands.Choice(name="Menor que 7 (retorno x1,89)", value="menor"),
+        app_commands.Choice(name="Maior que 7 (base x2)", value="maior"),
+        app_commands.Choice(name="Menor que 7 (base x2)", value="menor"),
     ]
 )
 async def maior_menor(
@@ -9156,9 +9204,9 @@ async def maior_menor(
 )
 @app_commands.choices(
     escolha=[
-        app_commands.Choice(name="Pedra (retorno x1,85)", value="pedra"),
-        app_commands.Choice(name="Papel (retorno x1,85)", value="papel"),
-        app_commands.Choice(name="Tesoura (retorno x1,85)", value="tesoura"),
+        app_commands.Choice(name="Pedra (base x2)", value="pedra"),
+        app_commands.Choice(name="Papel (base x2)", value="papel"),
+        app_commands.Choice(name="Tesoura (base x2)", value="tesoura"),
     ]
 )
 async def jokenpo(
