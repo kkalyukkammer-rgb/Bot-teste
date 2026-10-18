@@ -8,6 +8,7 @@ import random
 import sqlite3
 import tempfile
 import time
+import unicodedata
 from typing import Literal
 
 import discord
@@ -26,13 +27,20 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "**Novidades:** /workshift e /mudar_trabalho com limite diário de 8 horas "
-    "e empregos com salários e custos próprios; /roubar com até 5 tentativas "
-    "e recuperação após 24 horas; botão para repetir apostas na mesma mensagem.\n\n"
-    "**Correções:** /moeda, /dados e /roleta voltaram a enviar os resultados "
-    "normalmente; os resultados repetidos continuam atualizando a mensagem "
-    "original. Correções em comandos e mecânicas também serão incluídas "
-    "neste resumo a cada atualização."
+    "**Renda:** /workshift e /roubar agora renovam o limite/tentativas a "
+    "cada 8 horas. Salários por hora dobrados e ganhos de roubo aumentados "
+    "para 2.000–20.000 moedas por sucesso.\n\n"
+    "**Jogos:** /corrida foi renomeado para /jogo_do_bixo, agora com 16 "
+    "animais. Adicionados /maior_menor e /jokenpo, também liberados "
+    "progressivamente em /jogar_cassino. Resultados de apostas incluem "
+    "imagens; o caça-níquel mantém o GIF. Empates devolvem a aposta e há "
+    "botão para repetir no mesmo resultado/mensagem.\n\n"
+    "**Balanceamento e correções:** pagamentos de /moeda, /dados, /roleta, "
+    "/jogo_do_bixo, /cacaniquel, /maior_menor e /jokenpo ajustados para "
+    "cerca de 95% de retorno esperado antes dos bônus de prestígio. "
+    "Corrigidos resultados de /moeda, /dados e /roleta e alinhados "
+    "pagamentos/repetições nos cassinos locais. /ajuda agora separa "
+    "comandos por funcionalidade e resume as novidades."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
@@ -69,6 +77,9 @@ SLOT_PAIR_MULTIPLIERS = {
     "⭐": 4,
     "7️⃣": 6,
 }
+SLOT_PROFIT_FACTOR_NUMERATOR = 11_400
+SLOT_PROFIT_FACTOR_DENOMINATOR = 10_000
+BET_RETURN_PERCENT = 95
 BETTING_ANIMALS = (
     "Leão 🦁",
     "Tigre 🐯",
@@ -78,8 +89,19 @@ BETTING_ANIMALS = (
     "Lobo 🐺",
     "Coelho 🐰",
     "Panda 🐼",
+    "Urso 🐻",
+    "Javali 🐗",
+    "Crocodilo 🐊",
+    "Girafa 🦒",
+    "Zebra 🦓",
+    "Hipopótamo 🦛",
+    "Canguru 🦘",
+    "Tartaruga 🐢",
 )
-ANIMAL_BET_MULTIPLIERS = {1: 3, 2: 2, 3: 1.5}
+ANIMAL_BET_MULTIPLIERS = {
+    count: BET_RETURN_PERCENT * len(BETTING_ANIMALS) / 100 / count
+    for count in range(1, 4)
+}
 ANIMAL_BET_COOLDOWN = 24 * 60 * 60
 ROULETTE_RED_NUMBERS = frozenset(
     {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -117,19 +139,23 @@ CASINO_GAME_UNLOCKS = {
     "moeda": 0,
     "dados": 1,
     "roleta": 2,
+    "maior_menor": 2,
     "cacaniquel": 3,
+    "jokenpo": 3,
 }
 PVP_HOUSE_TAX_PERCENT = 5
 CASINO_PARTICIPANT_COMMANDS = frozenset(
     {
         "jogar_cassino",
         "cacaniquel",
-        "corrida",
+        "jogo_do_bixo",
         "moeda",
         "dados",
         "roleta",
         "duelo",
         "blackjack",
+        "maior_menor",
+        "jokenpo",
     }
 )
 CASINO_ROLE_REFRESH_COMMANDS = CASINO_PARTICIPANT_COMMANDS | frozenset(
@@ -171,18 +197,18 @@ AUTOROLE_CONDITIONS = {
     "bet_volume": "volume total apostado",
     "bet_count": "quantidade de apostas",
 }
-WORK_DAY_SECONDS = 24 * 60 * 60
+WORK_RECOVERY_SECONDS = 8 * 60 * 60
 WORK_LIMIT_SECONDS = 8 * 60 * 60
 WORK_INTERVAL_SECONDS = 30 * 60
 ROBBERY_MAX_ATTEMPTS = 5
-ROBBERY_RECOVERY_SECONDS = 24 * 60 * 60
+ROBBERY_RECOVERY_SECONDS = 8 * 60 * 60
 ROBBERY_SUCCESS_CHANCE = 0.65
 JOBS = {
-    "desempregado": ("Bico", 0, 2_000),
-    "entregador": ("Entregador", 5_000, 5_000),
-    "seguranca": ("Segurança", 20_000, 8_000),
-    "programador": ("Programador", 75_000, 12_000),
-    "influenciador": ("Influenciador", 200_000, 18_000),
+    "desempregado": ("Bico", 0, 4_000),
+    "entregador": ("Entregador", 5_000, 10_000),
+    "seguranca": ("Segurança", 20_000, 16_000),
+    "programador": ("Programador", 75_000, 24_000),
+    "influenciador": ("Influenciador", 200_000, 36_000),
 }
 
 
@@ -1436,6 +1462,109 @@ def format_coins(amount: int) -> str:
     return f"{amount:,}".replace(",", ".")
 
 
+def payout_for_target_rtp(
+    bet: int,
+    winning_outcomes: int,
+    total_outcomes: int,
+    *,
+    push_outcomes: int = 0,
+) -> int:
+    if (
+        bet <= 0
+        or total_outcomes <= 0
+        or winning_outcomes <= 0
+        or push_outcomes < 0
+        or winning_outcomes + push_outcomes > total_outcomes
+    ):
+        raise ValueError("Probabilidades ou valor de aposta inválidos.")
+    payout_numerator = (
+        BET_RETURN_PERCENT * total_outcomes - 100 * push_outcomes
+    )
+    if payout_numerator <= 0:
+        raise ValueError("O retorno esperado precisa ser positivo.")
+    return bet * payout_numerator // (100 * winning_outcomes)
+
+
+def render_bet_result_image(
+    game: str,
+    result: str,
+    payout: int,
+    bet: int,
+) -> io.BytesIO:
+    profit = payout - bet
+    background = (18, 24, 45)
+    accent = (71, 205, 145) if profit > 0 else (
+        (241, 190, 76) if profit == 0 else (235, 92, 105)
+    )
+    image = Image.new("RGB", (960, 360), background)
+    draw = ImageDraw.Draw(image)
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 31)
+        result_font = ImageFont.truetype(font_path, 25)
+        detail_font = ImageFont.truetype(font_path, 20)
+        emblem_font = ImageFont.truetype(font_path, 32)
+    except OSError:
+        title_font = ImageFont.load_default()
+        result_font = ImageFont.load_default()
+        detail_font = ImageFont.load_default()
+        emblem_font = ImageFont.load_default()
+
+    draw.rounded_rectangle(
+        (18, 18, 942, 342),
+        radius=30,
+        fill=(31, 39, 68),
+        outline=accent,
+        width=5,
+    )
+    draw.ellipse((58, 93, 258, 293), fill=(17, 23, 43), outline=accent, width=5)
+    game_label = unicodedata.normalize("NFKD", game.upper())
+    game_label = game_label.encode("ascii", "ignore").decode("ascii") or "JOGO"
+    emblem = "".join(word[0] for word in game_label.split()[:3])
+    draw.text(
+        (158, 193),
+        emblem,
+        font=emblem_font,
+        fill=accent,
+        anchor="mm",
+    )
+    draw.text((300, 76), game_label[:42], font=title_font, fill=(255, 225, 150))
+
+    art_result = result.replace("**", "").replace("`", "")
+    art_result = unicodedata.normalize("NFKD", art_result)
+    art_result = art_result.encode("ascii", "ignore").decode("ascii")
+    lines: list[str] = []
+    current_line = ""
+    for word in art_result.split():
+        candidate = f"{current_line} {word}".strip()
+        if current_line and draw.textbbox((0, 0), candidate, font=result_font)[2] > 590:
+            lines.append(current_line)
+            current_line = word
+        else:
+            current_line = candidate
+    if current_line:
+        lines.append(current_line)
+    for line_number, line in enumerate(lines[:3]):
+        draw.text(
+            (300, 137 + line_number * 36),
+            line,
+            font=result_font,
+            fill=(245, 247, 255),
+        )
+    draw.line((300, 260, 890, 260), fill=(73, 83, 117), width=2)
+    draw.text(
+        (300, 287),
+        f"APOSTA  {format_coins(bet)}    |    RETORNO  {format_coins(payout)}",
+        font=detail_font,
+        fill=(208, 216, 238),
+    )
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
 async def send_bet_result(
     interaction: discord.Interaction,
     *,
@@ -1449,32 +1578,71 @@ async def send_bet_result(
     edit_message: bool = False,
     file: discord.File | None = None,
     image_url: str | None = None,
+    currency_name: str = "moedas",
+    casino_name: str | None = None,
+    tax_percent: int | None = None,
+    tax_amount: int = 0,
+    treasury: int | None = None,
 ) -> None:
     net_change = payout - bet if payout else -bet
+    if file is None and image_url is None:
+        artwork = await asyncio.to_thread(
+            render_bet_result_image,
+            game,
+            result,
+            payout,
+            bet,
+        )
+        file = discord.File(artwork, filename="resultado-aposta.png")
+        image_url = "attachment://resultado-aposta.png"
     net_sign = "+" if net_change > 0 else ""
-    won = payout > 0
+    result_title = (
+        "🎉 VOCÊ GANHOU!"
+        if net_change > 0
+        else "🤝 EMPATE"
+        if net_change == 0
+        else "❌ VOCÊ PERDEU"
+    )
     embed = discord.Embed(
-        title=f"{'🎉 VOCÊ GANHOU!' if won else '❌ VOCÊ PERDEU'} — {game}",
+        title=f"{result_title} — {game}",
         description=result,
-        color=discord.Color.green() if won else discord.Color.red(),
+        color=(
+            discord.Color.green()
+            if net_change > 0
+            else discord.Color.gold()
+            if net_change == 0
+            else discord.Color.red()
+        ),
     )
     embed.add_field(name="Sua aposta", value=choice, inline=False)
     embed.add_field(
         name="🪙 Valor apostado",
-        value=f"{format_coins(bet)} moedas",
+        value=f"{format_coins(bet)} {currency_name}",
         inline=True,
     )
     embed.add_field(
         name="💰 Retorno total (inclui aposta)",
-        value=f"{format_coins(payout)} moedas",
+        value=f"{format_coins(payout)} {currency_name}",
         inline=True,
     )
     embed.add_field(
         name="📊 Lucro / prejuízo",
-        value=f"{net_sign}{format_coins(net_change)} moedas",
+        value=f"{net_sign}{format_coins(net_change)} {currency_name}",
         inline=True,
     )
-    embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
+    if tax_percent is not None:
+        embed.add_field(
+            name="Taxa paga à casa principal",
+            value=f"{format_coins(tax_amount)} {currency_name} ({tax_percent}%)",
+            inline=True,
+        )
+    footer = f"Saldo atual: {format_coins(balance)} {currency_name}"
+    if casino_name is not None and treasury is not None:
+        footer = (
+            f"{casino_name} | {footer} | Caixa: "
+            f"{format_coins(treasury)} {currency_name}"
+        )
+    embed.set_footer(text=footer)
     if image_url is not None:
         embed.set_image(url=image_url)
 
@@ -1502,12 +1670,14 @@ class BetAgainView(discord.ui.View):
         game: str,
         bet: int,
         choice: str | tuple[str, ...],
+        guild_id: int | None = None,
     ) -> None:
         super().__init__(timeout=300)
         self.user_id = user_id
         self.game = game
         self.bet = bet
         self.choice = choice
+        self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.user_id:
@@ -1528,7 +1698,13 @@ class BetAgainView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
-        await repeat_bet(interaction, self.game, self.bet, self.choice)
+        await repeat_bet(
+            interaction,
+            self.game,
+            self.bet,
+            self.choice,
+            guild_id=self.guild_id,
+        )
 
 
 async def repeat_bet(
@@ -1536,12 +1712,25 @@ async def repeat_bet(
     game: str,
     bet: int,
     choice: str | tuple[str, ...],
+    *,
+    guild_id: int | None = None,
 ) -> None:
     if not await ensure_betting_channel(interaction):
         return
-    if not await ensure_not_house_owner(interaction):
+    if guild_id is None and not await ensure_not_house_owner(interaction):
         return
     if not await ensure_bet_limit(interaction, bet):
+        return
+    casino = get_guild_casino(guild_id) if guild_id is not None else None
+    if guild_id is not None and (
+        interaction.guild is None
+        or interaction.guild.id != guild_id
+        or casino is None
+    ):
+        await interaction.response.send_message(
+            "Este cassino não está mais disponível neste servidor.",
+            ephemeral=True,
+        )
         return
 
     payout = 0
@@ -1552,7 +1741,7 @@ async def repeat_bet(
     if game == "moeda":
         result_value = random.choice(("cara", "coroa"))
         assert isinstance(choice, str)
-        payout = bet * 2 if choice == result_value else 0
+        payout = payout_for_target_rtp(bet, 1, 2) if choice == result_value else 0
         choice_text = f"Você escolheu **{choice.capitalize()}**."
         result = f"A moeda caiu em **{result_value.capitalize()}**."
     elif game == "dados":
@@ -1560,11 +1749,10 @@ async def repeat_bet(
         assert isinstance(choice, str)
         if choice in ("par", "ímpar"):
             won = ("par" if roll % 2 == 0 else "ímpar") == choice
-            multiplier = 2
+            payout = payout_for_target_rtp(bet, 3, 6) if won else 0
         else:
             won = roll == int(choice)
-            multiplier = 5
-        payout = bet * multiplier if won else 0
+            payout = payout_for_target_rtp(bet, 1, 6) if won else 0
         choice_text = f"Você escolheu **{choice.capitalize()}**."
         result = f"O dado caiu em **{roll}**."
     elif game == "roleta":
@@ -1577,10 +1765,55 @@ async def repeat_bet(
             else "preto"
         )
         assert isinstance(choice, str)
-        payout = bet * (36 if choice == "verde" else 2) if choice == result_color else 0
+        winning_outcomes = 1 if choice == "verde" else 18
+        payout = (
+            payout_for_target_rtp(bet, winning_outcomes, 37)
+            if choice == result_color
+            else 0
+        )
         choice_text = f"Você apostou em **{choice.capitalize()}**."
         result = f"A roleta parou no **{number} {result_color}**."
-    elif game == "corrida":
+    elif game == "maior_menor":
+        card = random.randint(1, 13)
+        assert isinstance(choice, str)
+        if card == 7:
+            payout = bet
+            result = f"Saiu **{card}**. Empate: sua aposta foi devolvida."
+        else:
+            won = (card > 7 and choice == "maior") or (
+                card < 7 and choice == "menor"
+            )
+            payout = (
+                payout_for_target_rtp(bet, 6, 13, push_outcomes=1)
+                if won
+                else 0
+            )
+            result = (
+                f"Saiu **{card}**; o resultado foi "
+                f"**{'maior' if card > 7 else 'menor'} que 7**."
+            )
+        choice_text = f"Você escolheu **{choice} que 7**."
+    elif game == "jokenpo":
+        assert isinstance(choice, str)
+        house_choice = random.choice(("pedra", "papel", "tesoura"))
+        beats = {
+            "pedra": "tesoura",
+            "papel": "pedra",
+            "tesoura": "papel",
+        }
+        if choice == house_choice:
+            payout = bet
+            result = (
+                f"Empate: ambos escolheram **{choice}**. "
+                "Sua aposta foi devolvida."
+            )
+        elif beats[choice] == house_choice:
+            payout = payout_for_target_rtp(bet, 1, 3, push_outcomes=1)
+            result = f"Você venceu: **{choice}** vence **{house_choice}**."
+        else:
+            result = f"A casa venceu: **{house_choice}** vence **{choice}**."
+        choice_text = f"Você escolheu **{choice}**."
+    elif game == "jogo_do_bixo":
         assert isinstance(choice, tuple)
         drawn_animal = random.choice(BETTING_ANIMALS)
         payout, multiplier = animal_bet_payout(choice, drawn_animal, bet)
@@ -1591,20 +1824,23 @@ async def repeat_bet(
         )
     elif game == "cacaniquel":
         reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
-        payout, combination, multiplier = slot_payout(reels, bet)
+        payout, combination, _ = slot_payout(reels, bet)
         choice_text = "Giro da máquina caça-níquel."
-        result = (
-            f"Resultado: **{' | '.join(reels)}** — {combination} "
-            f"(multiplicador x{multiplier})."
-        )
-        animation = await asyncio.to_thread(render_slot_gif, reels, payout, multiplier)
-        file = discord.File(animation, filename="cacaniquel.gif")
-        image_url = "attachment://cacaniquel.gif"
+        result = f"Resultado: **{' | '.join(reels)}** — {combination}."
     else:
         raise ValueError(f"Jogo de repetição desconhecido: {game}")
 
     payout = adjust_player_bet_payout(interaction.user.id, bet, payout)
-    if game == "corrida":
+    if game == "cacaniquel":
+        multiplier = payout / bet
+        result = (
+            f"Resultado: **{' | '.join(reels)}** — {combination} "
+            f"(multiplicador x{multiplier:g})."
+        )
+        animation = await asyncio.to_thread(render_slot_gif, reels, multiplier)
+        file = discord.File(animation, filename="cacaniquel.gif")
+        image_url = "attachment://cacaniquel.gif"
+    if game == "jogo_do_bixo":
         bet_status, balance, remaining = settle_animal_house_bet(
             interaction.user.id,
             get_house_owner_id(),
@@ -1625,6 +1861,54 @@ async def repeat_bet(
                 ephemeral=True,
             )
             return
+    elif guild_id is not None:
+        status, balance, treasury, tax_percent, tax = settle_guild_casino_bet(
+            guild_id,
+            interaction.user.id,
+            get_house_owner_id(),
+            bet,
+            payout,
+        )
+        if status != "settled":
+            message = (
+                f"Saldo insuficiente no cassino. Seu saldo é "
+                f"{format_coins(balance)}."
+                if status == "insufficient_player"
+                else "O caixa do cassino não cobre esse prêmio; "
+                "a aposta foi cancelada."
+                if status == "insufficient_treasury"
+                else "Não foi possível concluir a aposta porque o cassino "
+                "não está mais disponível."
+            )
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        assert casino is not None
+        _, casino_name, currency_name, _, _ = casino
+        await send_bet_result(
+            interaction,
+            game=casino_name,
+            bet=bet,
+            choice=choice_text,
+            result=result,
+            payout=payout,
+            balance=balance,
+            view=BetAgainView(
+                interaction.user.id,
+                game,
+                bet,
+                choice,
+                guild_id,
+            ),
+            edit_message=True,
+            file=file,
+            image_url=image_url,
+            currency_name=currency_name,
+            casino_name=casino_name,
+            tax_percent=tax_percent,
+            tax_amount=tax,
+            treasury=treasury,
+        )
+        return
     else:
         settled, balance, _ = settle_house_bet(
             interaction.user.id,
@@ -1787,7 +2071,10 @@ def work_player_shift(
         if job_key not in JOBS:
             raise ValueError(f"Trabalho inválido salvo para o usuário {user_id}.")
 
-        if work_started_at is None or now - work_started_at >= WORK_DAY_SECONDS:
+        if (
+            work_started_at is None
+            or now - work_started_at >= WORK_RECOVERY_SECONDS
+        ):
             work_used = 0
             work_started_at = now
 
@@ -1800,7 +2087,7 @@ def work_player_shift(
                 0,
                 balance,
                 remaining,
-                work_started_at + WORK_DAY_SECONDS,
+                work_started_at + WORK_RECOVERY_SECONDS,
             )
 
         intervals = max(1, remaining // WORK_INTERVAL_SECONDS)
@@ -1829,7 +2116,7 @@ def work_player_shift(
             payout,
             balance + payout,
             remaining,
-            work_started_at + WORK_DAY_SECONDS,
+            work_started_at + WORK_RECOVERY_SECONDS,
         )
 
 
@@ -1866,7 +2153,7 @@ def attempt_robbery(
             )
 
         if random.random() < ROBBERY_SUCCESS_CHANCE:
-            won_amount = random.randint(1_000, 10_000)
+            won_amount = random.randint(2_000, 20_000)
             attempts -= 1
             recover_at = now + ROBBERY_RECOVERY_SECONDS if attempts == 0 else None
             connection.execute(
@@ -3804,20 +4091,34 @@ class DeleteGuildCasinoView(discord.ui.View):
         )
 
 
-def slot_payout(reels: list[str], bet: int) -> tuple[int, str, int]:
+def slot_payout(reels: list[str], bet: int) -> tuple[int, str, float]:
     if len(reels) != 3 or bet <= 0:
         raise ValueError("A máquina exige três símbolos e uma aposta positiva.")
 
     if reels[0] == reels[1] == reels[2]:
-        multiplier = SLOT_TRIPLE_MULTIPLIERS[reels[0]]
-        return bet * multiplier, f"Trinca de {reels[0]}", multiplier
+        base_multiplier = SLOT_TRIPLE_MULTIPLIERS[reels[0]]
+        base_payout = bet * base_multiplier
+        payout = bet + (
+            (base_payout - bet) * SLOT_PROFIT_FACTOR_NUMERATOR
+            // SLOT_PROFIT_FACTOR_DENOMINATOR
+        )
+        return payout, f"Trinca de {reels[0]}", payout / bet
 
     for symbol in SLOT_SYMBOLS:
         if reels.count(symbol) == 2:
-            multiplier = SLOT_PAIR_MULTIPLIERS[symbol]
-            return bet * multiplier, f"Par de {symbol}", multiplier
+            base_multiplier = SLOT_PAIR_MULTIPLIERS[symbol]
+            base_payout = bet * base_multiplier
+            payout = (
+                bet + (
+                    (base_payout - bet) * SLOT_PROFIT_FACTOR_NUMERATOR
+                    // SLOT_PROFIT_FACTOR_DENOMINATOR
+                )
+                if base_payout > bet
+                else base_payout
+            )
+            return payout, f"Par de {symbol}", payout / bet
 
-    return 0, "Sem combinação premiada", 0
+    return 0, "Sem combinação premiada", 0.0
 
 
 def animal_bet_payout(
@@ -3834,9 +4135,14 @@ def animal_bet_payout(
     if drawn_animal not in BETTING_ANIMALS or bet <= 0:
         raise ValueError("Animal sorteado ou aposta inválidos.")
 
-    multiplier = ANIMAL_BET_MULTIPLIERS[len(selected_animals)]
-    payout = bet * 3 // 2 if len(selected_animals) == 3 else bet * int(multiplier)
-    return (payout if drawn_animal in selected_animals else 0), multiplier
+    count = len(selected_animals)
+    multiplier = ANIMAL_BET_MULTIPLIERS[count]
+    payout = (
+        payout_for_target_rtp(bet, count, len(BETTING_ANIMALS))
+        if drawn_animal in selected_animals
+        else 0
+    )
+    return payout, multiplier
 
 
 def draw_slot_symbol(
@@ -3941,7 +4247,7 @@ def draw_slot_symbol(
         )
 
 
-def render_slot_gif(reels: list[str], payout: int, multiplier: int) -> io.BytesIO:
+def render_slot_gif(reels: list[str], multiplier: float) -> io.BytesIO:
     width, height = 600, 330
     background = (18, 23, 48)
     reel_stops = (9, 14, 19)
@@ -3993,8 +4299,20 @@ def render_slot_gif(reels: list[str], payout: int, multiplier: int) -> io.BytesI
             draw_slot_symbol(draw, symbol, center_x, 157, symbol_font)
 
         if frame_index == frame_count - 1:
-            banner_color = "#53d89a" if payout else "#c6c9d8"
-            banner_text = f"PREMIO  x{multiplier}" if payout else "TENTE DE NOVO"
+            banner_color = (
+                "#53d89a"
+                if multiplier > 1
+                else "#f7c957"
+                if multiplier == 1
+                else "#c6c9d8"
+            )
+            banner_text = (
+                f"PREMIO  x{multiplier:g}"
+                if multiplier > 1
+                else "APOSTA DEVOLVIDA"
+                if multiplier == 1
+                else "TENTE DE NOVO"
+            )
             draw.rounded_rectangle(
                 (130, 254, 470, 298),
                 radius=18,
@@ -5074,7 +5392,7 @@ async def mudar_trabalho(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(
     name="workshift",
-    description="Trabalhe um período aleatório, até 8 horas por dia.",
+    description="Trabalhe até 8 horas; o limite renova a cada ciclo de 8 horas.",
 )
 async def workshift(interaction: discord.Interaction) -> None:
     status, job_key, duration, payout, balance, remaining, resets_at = (
@@ -5082,7 +5400,7 @@ async def workshift(interaction: discord.Interaction) -> None:
     )
     if status == "limit":
         await interaction.response.send_message(
-            "Você já trabalhou o limite de **8 horas**. "
+            "Você já trabalhou o limite de **8 horas neste ciclo**. "
             f"As horas serão recuperadas em {format_remaining(resets_at - int(time.time()))}.",
             ephemeral=True,
         )
@@ -5113,17 +5431,17 @@ async def workshift(interaction: discord.Interaction) -> None:
         inline=True,
     )
     embed.add_field(
-        name="Horas restantes hoje",
+        name="Horas restantes neste ciclo",
         value=f"{format_remaining(remaining)} de 8h",
         inline=False,
     )
-    embed.set_footer(text="O limite de trabalho é renovado a cada 24 horas.")
+    embed.set_footer(text="O limite de trabalho é renovado a cada 8 horas.")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(
     name="roubar",
-    description="Tente roubar moedas; você pode ganhar ou perder dinheiro.",
+    description="Tente roubar moedas; até 20.000 por sucesso.",
 )
 async def roubar(interaction: discord.Interaction) -> None:
     status, balance, attempts, amount, recover_at = attempt_robbery(
@@ -6599,15 +6917,16 @@ def create_guild_casino_upgrade_embed(
 ) -> discord.Embed:
     cost = CASINO_UPGRADE_COSTS[level]
     next_level = level + 1
-    unlocked_game = next(
+    unlocked_games = [
         game
         for game, required_level in CASINO_GAME_UNLOCKS.items()
         if required_level == next_level
-    )
+    ]
     embed = discord.Embed(
         title=f"Confirmar upgrade do cassino — nível {next_level}",
         description=(
-            f"O jogo **{unlocked_game}** será liberado e a taxa da casa "
+            f"Jogos liberados: **{', '.join(unlocked_games)}**. "
+            "A taxa da casa "
             f"principal reduzirá em {CASINO_TAX_REDUCTION_PER_LEVEL} ponto "
             f"percentual por nível, até o mínimo de "
             f"{CASINO_MINIMUM_TAX_PERCENT}%."
@@ -6661,14 +6980,14 @@ class GuildCasinoUpgradeView(discord.ui.View):
         if status == "upgraded":
             casino = get_guild_casino(self.guild_id)
             currency_name = casino[2] if casino is not None else "moedas"
-            unlocked_game = next(
+            unlocked_games = [
                 game
                 for game, required_level in CASINO_GAME_UNLOCKS.items()
                 if required_level == level
-            )
+            ]
             message = (
                 f"✅ Cassino promovido ao nível **{level}**! "
-                f"Jogo liberado: **{unlocked_game}**. Os **"
+                f"Jogos liberados: **{', '.join(unlocked_games)}**. Os **"
                 f"{format_coins(cost)} {currency_name}** foram pagos à "
                 "casa principal."
             )
@@ -6798,14 +7117,19 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
 @app_commands.describe(
     aposta="Quantidade de moedas locais para apostar.",
     jogo="Escolha um jogo já liberado pelo cassino.",
-    escolha="Cara/coroa, par/ímpar, número 1-6 ou vermelho/preto/verde.",
+    escolha=(
+        "Cara/coroa, par/ímpar, número, cor, maior/menor ou "
+        "pedra/papel/tesoura."
+    ),
 )
 @app_commands.choices(
     jogo=[
         app_commands.Choice(name="Cara ou coroa", value="moeda"),
         app_commands.Choice(name="Dados", value="dados"),
         app_commands.Choice(name="Roleta", value="roleta"),
+        app_commands.Choice(name="Maior ou menor", value="maior_menor"),
         app_commands.Choice(name="Caça-níquel", value="cacaniquel"),
+        app_commands.Choice(name="Jokenpô", value="jokenpo"),
     ]
 )
 async def jogar_cassino(
@@ -6837,6 +7161,7 @@ async def jogar_cassino(
         return
 
     drawn = ""
+    normalized_choice = ""
     if jogo.value == "moeda":
         normalized_choice = (escolha or "").strip().lower()
         if normalized_choice not in ("cara", "coroa"):
@@ -6846,7 +7171,11 @@ async def jogar_cassino(
             )
             return
         drawn = random.choice(("cara", "coroa"))
-        payout = aposta * 19 // 10 if normalized_choice == drawn else 0
+        payout = (
+            payout_for_target_rtp(aposta, 1, 2)
+            if normalized_choice == drawn
+            else 0
+        )
         choice_text = f"Escolha: **{normalized_choice}**."
         result = f"A moeda caiu em **{drawn}**."
     elif jogo.value == "dados":
@@ -6863,12 +7192,11 @@ async def jogar_cassino(
         if normalized_choice in ("par", "ímpar"):
             drawn = "par" if roll % 2 == 0 else "ímpar"
             won = drawn == normalized_choice
-            multiplier = 19 / 10
+            payout = payout_for_target_rtp(aposta, 3, 6) if won else 0
         else:
             drawn = str(roll)
             won = roll == int(normalized_choice)
-            multiplier = 57 / 10
-        payout = aposta * int(multiplier * 10) // 10 if won else 0
+            payout = payout_for_target_rtp(aposta, 1, 6) if won else 0
         choice_text = f"Escolha: **{normalized_choice}**."
         result = f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'})."
     elif jogo.value == "roleta":
@@ -6887,21 +7215,80 @@ async def jogar_cassino(
             if number in ROULETTE_RED_NUMBERS
             else "preto"
         )
-        multiplier = 342 if normalized_choice == "verde" else 19
-        payout = aposta * multiplier // 10 if normalized_choice == drawn else 0
+        winning_outcomes = 1 if normalized_choice == "verde" else 18
+        payout = (
+            payout_for_target_rtp(aposta, winning_outcomes, 37)
+            if normalized_choice == drawn
+            else 0
+        )
         choice_text = f"Escolha: **{normalized_choice}**."
         result = f"A roleta parou no **{number} {drawn}**."
+    elif jogo.value == "maior_menor":
+        normalized_choice = (escolha or "").strip().lower()
+        if normalized_choice not in ("maior", "menor"):
+            await interaction.response.send_message(
+                "Para maior ou menor, escolha `maior` ou `menor` que 7.",
+                ephemeral=True,
+            )
+            return
+        card = random.randint(1, 13)
+        if card == 7:
+            payout = aposta
+            result = f"Saiu **{card}**. Empate: sua aposta foi devolvida."
+        else:
+            won = (card > 7 and normalized_choice == "maior") or (
+                card < 7 and normalized_choice == "menor"
+            )
+            payout = (
+                payout_for_target_rtp(aposta, 6, 13, push_outcomes=1)
+                if won
+                else 0
+            )
+            result = (
+                f"Saiu **{card}**; o resultado foi "
+                f"**{'maior' if card > 7 else 'menor'} que 7**."
+            )
+        choice_text = f"Escolha: **{normalized_choice} que 7**."
+    elif jogo.value == "jokenpo":
+        normalized_choice = (escolha or "").strip().lower()
+        if normalized_choice not in ("pedra", "papel", "tesoura"):
+            await interaction.response.send_message(
+                "Para jokenpô, escolha `pedra`, `papel` ou `tesoura`.",
+                ephemeral=True,
+            )
+            return
+        drawn = random.choice(("pedra", "papel", "tesoura"))
+        beats = {
+            "pedra": "tesoura",
+            "papel": "pedra",
+            "tesoura": "papel",
+        }
+        if normalized_choice == drawn:
+            payout = aposta
+            result = (
+                f"Empate: ambos escolheram **{drawn}**. "
+                "Sua aposta foi devolvida."
+            )
+        elif beats[normalized_choice] == drawn:
+            payout = payout_for_target_rtp(aposta, 1, 3, push_outcomes=1)
+            result = f"Você venceu: **{normalized_choice}** vence **{drawn}**."
+        else:
+            payout = 0
+            result = f"A casa venceu: **{drawn}** vence **{normalized_choice}**."
+        choice_text = f"Escolha: **{normalized_choice}**."
     else:
         reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
-        payout, combination, multiplier = slot_payout(reels, aposta)
+        payout, combination, _ = slot_payout(reels, aposta)
         drawn = " | ".join(reels)
         choice_text = f"Combinação: **{drawn}**."
-        result = (
-            f"{combination}! Multiplicador x{multiplier}. "
-            f"Combinação: **{drawn}**."
-        )
+        result = f"{combination}! Combinação: **{drawn}**."
 
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    if jogo.value == "cacaniquel":
+        result = (
+            f"{combination}! Multiplicador x{payout / aposta:g}. "
+            f"Combinação: **{drawn}**."
+        )
     settlement = settle_guild_casino_bet(
         guild.id,
         interaction.user.id,
@@ -6931,48 +7318,27 @@ async def jogar_cassino(
         )
         return
 
-    net_change = payout - aposta
-    net_sign = "+" if net_change > 0 else ""
-    embed = discord.Embed(
-        title=(
-            f"{'🎉 VOCÊ GANHOU!' if net_change > 0 else '❌ VOCÊ PERDEU' if net_change < 0 else '🤝 SEM LUCRO OU PREJUÍZO'} — {name}"
+    await send_bet_result(
+        interaction,
+        game=name,
+        bet=aposta,
+        choice=choice_text,
+        result=result,
+        payout=payout,
+        balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            jogo.value,
+            aposta,
+            normalized_choice if jogo.value != "cacaniquel" else "giro",
+            guild_id=guild.id,
         ),
-        description=f"{result}\n{choice_text}",
-        color=(
-            discord.Color.green()
-            if net_change > 0
-            else discord.Color.red()
-            if net_change < 0
-            else discord.Color.gold()
-        ),
+        currency_name=currency_name,
+        casino_name=name,
+        tax_percent=tax_percent,
+        tax_amount=tax,
+        treasury=treasury,
     )
-    embed.add_field(
-        name="Aposta",
-        value=f"{format_coins(aposta)} {currency_name}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Retorno total",
-        value=f"{format_coins(payout)} {currency_name}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Lucro / prejuízo",
-        value=f"{net_sign}{format_coins(net_change)} {currency_name}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Taxa paga à casa principal",
-        value=f"{format_coins(tax)} {currency_name} ({tax_percent}%)",
-        inline=True,
-    )
-    embed.set_footer(
-        text=(
-            f"Seu saldo: {format_coins(balance)} {currency_name} | "
-            f"Caixa do cassino: {format_coins(treasury)} {currency_name}"
-        )
-    )
-    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="cacaniquel", description="Gire a máquina caça-níquel usando suas moedas.")
@@ -6991,9 +7357,10 @@ async def cacaniquel(
 
     await interaction.response.defer()
     reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
-    payout, combination, multiplier = slot_payout(reels, aposta)
+    payout, combination, _ = slot_payout(reels, aposta)
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
-    animation = await asyncio.to_thread(render_slot_gif, reels, payout, multiplier)
+    multiplier = payout / aposta
+    animation = await asyncio.to_thread(render_slot_gif, reels, multiplier)
 
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
@@ -7010,11 +7377,16 @@ async def cacaniquel(
         )
         return
 
-    if payout:
+    if payout > aposta:
         outcome = f"**{combination}! Multiplicador x{multiplier}.**"
         result_title = "🎉 VOCÊ GANHOU!"
         net_change = payout - aposta
         color = discord.Color.green()
+    elif payout == aposta:
+        outcome = f"**{combination}. Sua aposta foi devolvida.**"
+        result_title = "🤝 EMPATE"
+        net_change = 0
+        color = discord.Color.gold()
     else:
         outcome = f"**{combination}.**"
         result_title = "😿 SEM PRÊMIO"
@@ -7051,9 +7423,9 @@ async def cacaniquel(
     embed.add_field(
         name="Combinações premiadas",
         value=(
-            "Pares: 🍒 x1 • 🍋 x1 • 🔔 x2 • 💎 x3 • ⭐ x4 • 7️⃣ x6\n"
-            "Trincas: 🍒 x2 • 🍋 x3 • 🔔 x5 • 💎 x8 • ⭐ x12 • 7️⃣ x25\n"
-            "O multiplicador indica o total de moedas recebido."
+            "Os prêmios foram recalibrados para manter o retorno esperado "
+            "próximo de 95% antes dos bônus de prestígio. O multiplicador "
+            "considera o retorno final desta aposta."
         ),
         inline=False,
     )
@@ -7070,7 +7442,10 @@ async def cacaniquel(
     )
 
 
-@bot.tree.command(name="corrida", description="Aposte em até três animais e tente acertar o sorteado.")
+@bot.tree.command(
+    name="jogo_do_bixo",
+    description="Aposte em até três animais e tente acertar o sorteado.",
+)
 @app_commands.guild_only()
 @app_commands.describe(
     aposta="Moedas para apostar.",
@@ -7083,7 +7458,7 @@ async def cacaniquel(
     animal_2=[app_commands.Choice(name=animal, value=animal) for animal in BETTING_ANIMALS],
     animal_3=[app_commands.Choice(name=animal, value=animal) for animal in BETTING_ANIMALS],
 )
-async def corrida(
+async def jogo_do_bixo(
     interaction: discord.Interaction,
     aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
     animal: str,
@@ -7198,18 +7573,27 @@ async def corrida(
         inline=True,
     )
     embed.set_footer(text=f"Saldo atual: {format_coins(balance)} moedas")
+    artwork = await asyncio.to_thread(
+        render_bet_result_image,
+        "JOGO DO BICHO",
+        result,
+        payout,
+        aposta,
+    )
+    embed.set_image(url="attachment://resultado-jogo-do-bicho.png")
     await interaction.response.send_message(
         embed=embed,
+        file=discord.File(artwork, filename="resultado-jogo-do-bicho.png"),
         view=BetAgainView(
             interaction.user.id,
-            "corrida",
+            "jogo_do_bixo",
             aposta,
             tuple(selected_animals),
         ),
     )
 
 
-@bot.tree.command(name="moeda", description="Aposte em cara ou coroa e ganhe o dobro do retorno.")
+@bot.tree.command(name="moeda", description="Aposte em cara ou coroa com retorno de 1,9x.")
 @app_commands.guild_only()
 @app_commands.describe(aposta="Quantidade de moedas para apostar.")
 @app_commands.choices(
@@ -7231,7 +7615,11 @@ async def moeda(
         return
 
     result = random.choice(("cara", "coroa"))
-    payout = aposta * 2 if escolha.value == result else 0
+    payout = (
+        payout_for_target_rtp(aposta, 1, 2)
+        if escolha.value == result
+        else 0
+    )
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
@@ -7270,10 +7658,10 @@ async def moeda(
 @app_commands.describe(aposta="Quantidade de moedas para apostar.")
 @app_commands.choices(
     escolha=[
-        app_commands.Choice(name="Par (retorno x2)", value="par"),
-        app_commands.Choice(name="Ímpar (retorno x2)", value="ímpar"),
+        app_commands.Choice(name="Par (retorno x1,9)", value="par"),
+        app_commands.Choice(name="Ímpar (retorno x1,9)", value="ímpar"),
         *[
-            app_commands.Choice(name=f"Número {number} (retorno x5)", value=str(number))
+            app_commands.Choice(name=f"Número {number} (retorno x5,7)", value=str(number))
             for number in range(1, 7)
         ],
     ]
@@ -7293,12 +7681,11 @@ async def dados(
     roll = random.randint(1, 6)
     if escolha.value in ("par", "ímpar"):
         won = ("par" if roll % 2 == 0 else "ímpar") == escolha.value
-        multiplier = 2
+        payout = payout_for_target_rtp(aposta, 3, 6) if won else 0
     else:
         won = roll == int(escolha.value)
-        multiplier = 5
+        payout = payout_for_target_rtp(aposta, 1, 6) if won else 0
 
-    payout = aposta * multiplier if won else 0
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
@@ -7337,9 +7724,9 @@ async def dados(
 @app_commands.describe(aposta="Quantidade de moedas para apostar.")
 @app_commands.choices(
     cor=[
-        app_commands.Choice(name="Vermelho (retorno x2)", value="vermelho"),
-        app_commands.Choice(name="Preto (retorno x2)", value="preto"),
-        app_commands.Choice(name="Verde / zero (retorno x36)", value="verde"),
+        app_commands.Choice(name="Vermelho (retorno x1,95)", value="vermelho"),
+        app_commands.Choice(name="Preto (retorno x1,95)", value="preto"),
+        app_commands.Choice(name="Verde / zero (retorno x35,15)", value="verde"),
     ]
 )
 async def roleta(
@@ -7362,8 +7749,12 @@ async def roleta(
         if number in ROULETTE_RED_NUMBERS
         else "preto"
     )
-    multiplier = 36 if cor.value == "verde" else 2
-    payout = aposta * multiplier if cor.value == result_color else 0
+    winning_outcomes = 1 if cor.value == "verde" else 18
+    payout = (
+        payout_for_target_rtp(aposta, winning_outcomes, 37)
+        if cor.value == result_color
+        else 0
+    )
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
@@ -7393,6 +7784,163 @@ async def roleta(
             "roleta",
             aposta,
             cor.value,
+        ),
+    )
+
+
+@bot.tree.command(
+    name="maior_menor",
+    description="Adivinhe se a carta será maior ou menor que 7.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    aposta="Valor da aposta.",
+    escolha="Aposte se a carta será maior ou menor que 7.",
+)
+@app_commands.choices(
+    escolha=[
+        app_commands.Choice(name="Maior que 7 (retorno x1,89)", value="maior"),
+        app_commands.Choice(name="Menor que 7 (retorno x1,89)", value="menor"),
+    ]
+)
+async def maior_menor(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
+    escolha: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, aposta):
+        return
+
+    card = random.randint(1, 13)
+    if card == 7:
+        payout = aposta
+        result = "Saiu **7**. Empate: sua aposta foi devolvida."
+    else:
+        won = (card > 7 and escolha.value == "maior") or (
+            card < 7 and escolha.value == "menor"
+        )
+        payout = (
+            payout_for_target_rtp(aposta, 6, 13, push_outcomes=1)
+            if won
+            else 0
+        )
+        result = (
+            f"Saiu **{card}**; o resultado foi "
+            f"**{'maior' if card > 7 else 'menor'} que 7**."
+        )
+    payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir esse resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="MAIOR OU MENOR",
+        bet=aposta,
+        choice=f"Você escolheu **{escolha.name}**.",
+        result=result,
+        payout=payout,
+        balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            "maior_menor",
+            aposta,
+            escolha.value,
+        ),
+    )
+
+
+@bot.tree.command(
+    name="jokenpo",
+    description="Jogue pedra, papel ou tesoura contra a casa.",
+)
+@app_commands.guild_only()
+@app_commands.describe(
+    aposta="Valor da aposta.",
+    escolha="Escolha pedra, papel ou tesoura.",
+)
+@app_commands.choices(
+    escolha=[
+        app_commands.Choice(name="Pedra (retorno x1,85)", value="pedra"),
+        app_commands.Choice(name="Papel (retorno x1,85)", value="papel"),
+        app_commands.Choice(name="Tesoura (retorno x1,85)", value="tesoura"),
+    ]
+)
+async def jokenpo(
+    interaction: discord.Interaction,
+    aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
+    escolha: app_commands.Choice[str],
+) -> None:
+    if not await ensure_betting_channel(interaction):
+        return
+    if not await ensure_not_house_owner(interaction):
+        return
+    if not await ensure_bet_limit(interaction, aposta):
+        return
+
+    drawn = random.choice(("pedra", "papel", "tesoura"))
+    beats = {
+        "pedra": "tesoura",
+        "papel": "pedra",
+        "tesoura": "papel",
+    }
+    if escolha.value == drawn:
+        payout = aposta
+        result = (
+            f"Empate: ambos escolheram **{drawn}**. "
+            "Sua aposta foi devolvida."
+        )
+    elif beats[escolha.value] == drawn:
+        payout = payout_for_target_rtp(aposta, 1, 3, push_outcomes=1)
+        result = f"Você venceu: **{escolha.value}** vence **{drawn}**."
+    else:
+        payout = 0
+        result = f"A casa venceu: **{drawn}** vence **{escolha.value}**."
+
+    payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    settled, balance, _ = settle_house_bet(
+        interaction.user.id,
+        get_house_owner_id(),
+        aposta,
+        payout,
+    )
+    if not settled:
+        await interaction.response.send_message(
+            "A aposta foi cancelada: saldo insuficiente ou banca principal "
+            "sem fundos para cobrir esse resultado. "
+            f"Seu saldo continua em {format_coins(balance)} moedas.",
+            ephemeral=True,
+        )
+        return
+
+    await send_bet_result(
+        interaction,
+        game="JOKENPÔ",
+        bet=aposta,
+        choice=f"Você escolheu **{escolha.name}**.",
+        result=result,
+        payout=payout,
+        balance=balance,
+        view=BetAgainView(
+            interaction.user.id,
+            "jokenpo",
+            aposta,
+            escolha.value,
         ),
     )
 
@@ -7867,15 +8415,196 @@ async def userinfo(
 
 @bot.tree.command(name="ajuda", description="Lista os comandos slash disponíveis.")
 async def ajuda(interaction: discord.Interaction) -> None:
-    command_lines = [
-        f"`/{command.name}` — {command.description}"
+    commands = {
+        command.name: command
         for command in bot.tree.get_commands()
         if isinstance(command, app_commands.Command)
-    ]
+    }
+    categories = (
+        (
+            "💰 Formas de ganhar moedas",
+            (
+                "daily",
+                "weekly",
+                "monthly",
+                "workshift",
+                "mudar_trabalho",
+                "roubar",
+            ),
+        ),
+        (
+            "🎲 Jogos de aposta",
+            (
+                "moeda",
+                "dados",
+                "roleta",
+                "jogo_do_bixo",
+                "cacaniquel",
+                "maior_menor",
+                "jokenpo",
+                "blackjack",
+                "duelo",
+            ),
+        ),
+        (
+            "🏦 Cassino do servidor",
+            (
+                "criar_cassino",
+                "jogar_cassino",
+                "daily_cassino",
+                "weekly_cassino",
+                "saldo_cassino",
+                "status_cassino",
+                "leaderboard_cassino",
+                "upgrade_cassino",
+                "contratar_npcs_cassino",
+                "excluir_cassino",
+                "solicitar_jogo_cassino",
+            ),
+        ),
+        (
+            "👤 Saldo e progresso",
+            (
+                "saldo",
+                "status_apostador",
+                "leaderboard",
+                "prestigio",
+                "upgrade_prestigio",
+            ),
+        ),
+        (
+            "🛠️ Configuração e administração",
+            (
+                "canal_apostas",
+                "configurar_autorole_cassino",
+                "configurar_cassinos",
+                "configurar_npcs_principais",
+                "upgrade_casa_principal",
+                "status_casa_principal",
+                "resetar_dados_jogadores",
+                "anunciar_update",
+            ),
+        ),
+        (
+            "🛡️ Moderação e servidor",
+            (
+                "clear",
+                "kick",
+                "ban",
+                "unban",
+                "mute",
+                "unmute",
+                "serverinfo",
+                "userinfo",
+            ),
+        ),
+        (
+            "⚙️ Bot e suporte",
+            (
+                "feedback",
+                "shutdown",
+                "restart",
+                "status",
+                "clear_status",
+                "set_activity",
+                "clear_activity",
+                "set_status_type",
+                "clear_status_type",
+            ),
+        ),
+    )
     embed = discord.Embed(
-        title="Comandos do bot",
-        description="\n".join(command_lines),
-        color=discord.Color.blue(),
+        title="📖 Guia de comandos",
+        description=(
+            "Comandos organizados por funcionalidade. Ganhos de trabalho e "
+            "tentativas de roubo renovam a cada **8 horas**. Use os comandos "
+            "de jogo para apostar e consulte os saldos antes de jogar."
+        ),
+        color=discord.Color.blurple(),
+    )
+    assigned_commands = {"ajuda"}
+    for category_name, command_names in categories:
+        category_lines = [
+            f"`/{name}` — {commands[name].description}"
+            for name in command_names
+            if name in commands
+        ]
+        assigned_commands.update(
+            name for name in command_names if name in commands
+        )
+        if not category_lines:
+            continue
+
+        field_title = category_name
+        field_lines: list[str] = []
+        field_length = 0
+        for line in category_lines:
+            if field_lines and field_length + len(line) + 1 > 1_000:
+                embed.add_field(
+                    name=field_title,
+                    value="\n".join(field_lines),
+                    inline=False,
+                )
+                field_title = f"{category_name} (continuação)"
+                field_lines = []
+                field_length = 0
+            field_lines.append(line)
+            field_length += len(line) + 1
+        embed.add_field(
+            name=field_title,
+            value="\n".join(field_lines),
+            inline=False,
+        )
+
+    remaining_commands = sorted(
+        (
+            command
+            for name, command in commands.items()
+            if name not in assigned_commands
+        ),
+        key=lambda command: command.name,
+    )
+    if remaining_commands:
+        other_lines = [
+            f"`/{command.name}` — {command.description}"
+            for command in remaining_commands
+        ]
+        field_lines = []
+        field_length = 0
+        field_title = "📚 Outros comandos"
+        for line in other_lines:
+            if field_lines and field_length + len(line) + 1 > 1_000:
+                embed.add_field(
+                    name=field_title,
+                    value="\n".join(field_lines),
+                    inline=False,
+                )
+                field_title = "📚 Outros comandos (continuação)"
+                field_lines = []
+                field_length = 0
+            field_lines.append(line)
+            field_length += len(line) + 1
+        embed.add_field(
+            name=field_title,
+            value="\n".join(field_lines),
+            inline=False,
+        )
+
+    embed.add_field(
+        name="✨ Atualizações recentes",
+        value=(
+            "Balanceamento de jogos: cerca de 95% de retorno esperado antes "
+            "dos bônus de prestígio; adicionados `/maior_menor` e `/jokenpo`; "
+            "`/corrida` virou `/jogo_do_bixo` com 16 animais. Apostas exibem "
+            "artes de resultado, empates devolvem a aposta e podem ser "
+            "repetidas na mesma mensagem. Cassinos locais liberam jogos por "
+            "nível e upgrades mostram os jogos desbloqueados. `/mudar_trabalho` "
+            "permite escolher profissão; `/workshift` e `/roubar` renovam a "
+            "cada 8h, salários dobraram e roubos bem-sucedidos pagam "
+            "2.000–20.000 moedas. Também houve correções nos resultados de "
+            "moeda, dados, roleta e nos pagamentos de cassinos locais."
+        ),
+        inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
