@@ -45,7 +45,7 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "O autoblock pode ser configurado pelo dono do bot com `/configurar_autoblock`, definindo janela, quantidade de comandos, duracao da punicao e limite de punicoes. Ao atingir o limite, o usuario fica bloqueado por 24 horas.\n\n"
-    "A verificacao anti-macro pode pedir um desafio aleatorio ao atingir o limite anti-spam, com intervalo aleatorio de 3 a 10 minutos entre desafios para cada usuario.\n\n"
+    "O desafio anti-macro aparece no primeiro comando de cada usuario e, depois de resolvido, pode reaparecer com intervalo aleatorio de 3 a 10 minutos. Se ficar sem resposta, o bot mantem o mesmo desafio para uma tentativa posterior.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
     "O servidor principal e o servidor dos anuncios. No servidor de destino, o dono do bot pode usar `/ativar_servidor` e informar o ID do proprio servidor.\n"
     "Tambem e possivel liberar pelo servidor principal com `/autorizar_servidor` ou revogar com `/revogar_servidor`."
@@ -823,20 +823,6 @@ class CommandSpamGuard:
   def clear_activity(self, user_id: int) -> None:
     self._timestamps.pop(user_id, None)
 
-  def would_trigger(self, user_id: int, now: float | None = None) -> bool:
-    current = time.monotonic() if now is None else now
-    if self._blocked_until.get(user_id, 0.0) > current:
-      return False
-    timestamps = self._timestamps.get(user_id)
-    if timestamps is None:
-      return self.command_limit <= 1
-    while timestamps and current - timestamps[0] >= self.window_seconds:
-      timestamps.popleft()
-    if not timestamps:
-      self._timestamps.pop(user_id, None)
-      return self.command_limit <= 1
-    return len(timestamps) + 1 >= self.command_limit
-
   def check(self, user_id: int, now: float | None = None) -> int | None:
     current = time.monotonic() if now is None else now
     self.last_punishment_applied = False
@@ -906,6 +892,14 @@ MACRO_CHECK_PENDING: dict[int, tuple[int, str]] = {}
 MACRO_CHECK_NEXT_AT: dict[int, float] = {}
 
 
+def schedule_next_macro_challenge(user_id: int) -> None:
+  cooldown_seconds = random.randint(
+      MACRO_CHALLENGE_COOLDOWN_MIN_SECONDS,
+      MACRO_CHALLENGE_COOLDOWN_MAX_SECONDS,
+  )
+  MACRO_CHECK_NEXT_AT[user_id] = time.monotonic() + cooldown_seconds
+
+
 def create_macro_captcha() -> tuple[int, str, list[int]]:
   left = random.randint(2, 20)
   right = random.randint(2, 20)
@@ -933,6 +927,7 @@ class MacroCaptchaView(discord.ui.View):
         if value == answer:
           MACRO_CHECK_PENDING.pop(user_id, None)
           COMMAND_SPAM_GUARD.clear_activity(user_id)
+          schedule_next_macro_challenge(user_id)
           await interaction.response.edit_message(
               content="Verificacao concluida. Seus comandos foram liberados.",
               view=None,
@@ -941,6 +936,7 @@ class MacroCaptchaView(discord.ui.View):
 
         MACRO_CHECK_PENDING.pop(user_id, None)
         COMMAND_SPAM_GUARD.clear_activity(user_id)
+        schedule_next_macro_challenge(user_id)
         penalty = COMMAND_SPAM_GUARD.punishment_seconds
         COMMAND_SPAM_GUARD._blocked_until[user_id] = time.monotonic() + penalty
         await interaction.response.edit_message(
@@ -1057,15 +1053,7 @@ class BlacklistCommandTree(app_commands.CommandTree):
     current_time = time.monotonic()
     next_challenge_at = MACRO_CHECK_NEXT_AT.get(interaction.user.id, 0.0)
     challenge_ready = current_time >= next_challenge_at
-    if challenge_ready and COMMAND_SPAM_GUARD.would_trigger(
-        interaction.user.id, now=current_time
-    ):
-      COMMAND_SPAM_GUARD.clear_activity(interaction.user.id)
-      cooldown_seconds = random.randint(
-          MACRO_CHALLENGE_COOLDOWN_MIN_SECONDS,
-          MACRO_CHALLENGE_COOLDOWN_MAX_SECONDS,
-      )
-      MACRO_CHECK_NEXT_AT[interaction.user.id] = current_time + cooldown_seconds
+    if challenge_ready:
       prompt, captcha_view = get_macro_captcha_view(interaction.user.id)
       await interaction.response.send_message(
           f"{prompt}\nResolva o desafio para continuar usando comandos.",
