@@ -42,8 +42,8 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "trabalho e roubo, além das recompensas globais e do cassino local.\n\n"
     "O comando `/resetar_dados_jogadores` ganhou opções para liberar cada tipo "
     "de cooldown separadamente ou todos de uma vez.\n\n"
-    "Corrigida a migração do banco para reservas antigas de blackjack, "
-    "evitando falhas nas apostas dos NPCs e nos jogos que consultam essas reservas.\n\n"
+    "Corrigida a migração de bancos antigos: reservas de blackjack e "
+    "proprietários de cassinos locais mantêm compatibilidade com apostas dos NPCs.\n\n"
     "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
@@ -409,9 +409,35 @@ def initialize_economy() -> None:
             """
         )
         casino_columns = {
-            column[1]
+            column[1].casefold(): column[1]
             for column in connection.execute("PRAGMA table_info(guild_casinos)")
         }
+        legacy_casino_owner_column = next(
+            (
+                casino_columns[name]
+                for name in ("owner_id", "casino_owner_id")
+                if name in casino_columns
+            ),
+            None,
+        )
+        if "bot_owner_id" not in casino_columns:
+            if legacy_casino_owner_column is not None:
+                connection.execute(
+                    "ALTER TABLE guild_casinos RENAME COLUMN "
+                    f'"{legacy_casino_owner_column}" TO BOT_OWNER_ID'
+                )
+            else:
+                connection.execute(
+                    "ALTER TABLE guild_casinos "
+                    "ADD COLUMN BOT_OWNER_ID INTEGER NOT NULL "
+                    f"DEFAULT {BOT_OWNER_ID}"
+                )
+            casino_columns = {
+                column[1].casefold(): column[1]
+                for column in connection.execute(
+                    "PRAGMA table_info(guild_casinos)"
+                )
+            }
         casino_migrations = {
             "npc_count": CASINO_STARTING_NPCS,
             "games_played": 0,
@@ -430,7 +456,7 @@ def initialize_economy() -> None:
             "player_bet_lost": 0,
         }
         for column, default in casino_migrations.items():
-            if column not in casino_columns:
+            if column.casefold() not in casino_columns:
                 connection.execute(
                     "ALTER TABLE guild_casinos "
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}"
@@ -480,12 +506,62 @@ def initialize_economy() -> None:
             """
         )
         reservation_columns = {
-            column[1].casefold()
+            column[1].casefold(): column[1]
             for column in connection.execute(
                 "PRAGMA table_info(house_bet_reservations)"
             )
         }
-        if "house_bot_owner_id" not in reservation_columns:
+        legacy_house_owner_column = next(
+            (
+                reservation_columns[name]
+                for name in ("house_owner_id", "house_owner_bot_id", "owner_id")
+                if name in reservation_columns
+            ),
+            None,
+        )
+        if legacy_house_owner_column is not None:
+            owner_expression = (
+                "house_BOT_OWNER_ID"
+                if "house_bot_owner_id" in reservation_columns
+                else f'"{legacy_house_owner_column}"'
+            )
+            exposure_expression = (
+                "exposure" if "exposure" in reservation_columns else "amount"
+            )
+            connection.execute(
+                "ALTER TABLE house_bet_reservations "
+                "RENAME TO house_bet_reservations_legacy"
+            )
+            connection.execute(
+                """
+                CREATE TABLE house_bet_reservations (
+                    reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    house_BOT_OWNER_ID INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    exposure INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                f"""
+                INSERT INTO house_bet_reservations
+                    (reservation_id, user_id, house_BOT_OWNER_ID,
+                     amount, exposure, created_at)
+                SELECT reservation_id, user_id, {owner_expression},
+                       amount, {exposure_expression}, created_at
+                FROM house_bet_reservations_legacy
+                """
+            )
+            connection.execute("DROP TABLE house_bet_reservations_legacy")
+            reservation_columns = {
+                column[1].casefold()
+                for column in connection.execute(
+                    "PRAGMA table_info(house_bet_reservations)"
+                )
+            }
+        elif "house_bot_owner_id" not in reservation_columns:
             connection.execute(
                 "ALTER TABLE house_bet_reservations "
                 "ADD COLUMN house_BOT_OWNER_ID INTEGER NOT NULL "
