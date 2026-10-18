@@ -43,12 +43,11 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
-    "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 17 segundos.\n"
-    "20 comandos em 60 segundos tambem acionam a restricao temporaria.\n"
+    "Apos 5 comandos em 10 segundos ou 20 comandos em 60 segundos, ha um bloqueio temporario de 17 segundos.\n"
     "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
-    "Os comandos funcionam apenas em servidores liberados pelo dono. O servidor principal e o servidor dos anuncios.\n"
-    "Use `/autorizar_servidor`, `/revogar_servidor` e `/servidores_autorizados` no servidor principal."
+    "O servidor principal e o servidor dos anuncios. No servidor de destino, o dono do bot pode usar `/ativar_servidor` e informar o ID do proprio servidor.\n"
+    "Tambem e possivel liberar pelo servidor principal com `/autorizar_servidor` ou revogar com `/revogar_servidor`."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
@@ -879,7 +878,12 @@ class BlacklistCommandTree(app_commands.CommandTree):
         )
       return False
 
-    if not guild_authorized:
+    activation_command = (
+        isinstance(interaction.data, dict)
+        and interaction.data.get("name") == "ativar_servidor"
+        and interaction.user.id == BOT_OWNER_ID
+    )
+    if not guild_authorized and not activation_command:
       if not interaction.response.is_done():
         await interaction.response.send_message(
             "Este servidor não está autorizado a usar os comandos do bot.",
@@ -9990,6 +9994,43 @@ async def ajuda(interaction: discord.Interaction) -> None:
     if current_embed.fields or not embeds:
         embeds.append(current_embed)
     await interaction.response.send_message(embeds=embeds, ephemeral=True)
+
+
+@bot.tree.command(
+    name="ativar_servidor",
+    description="Ativa este servidor informando seu ID (dono do bot).",
+)
+@app_commands.guild_only()
+@app_commands.check(is_bot_owner)
+@app_commands.describe(guild_id="Informe o ID deste servidor para ativá-lo.")
+async def ativar_servidor(
+    interaction: discord.Interaction,
+    guild_id: str,
+) -> None:
+    if not guild_id.isascii() or not guild_id.isdecimal():
+        await interaction.response.send_message(
+            "Informe o ID numérico deste servidor.", ephemeral=True
+        )
+        return
+
+    parsed_guild_id = int(guild_id)
+    if not 0 < parsed_guild_id <= 9_223_372_036_854_775_807:
+        await interaction.response.send_message(
+            "O ID informado está fora do intervalo aceito.", ephemeral=True
+        )
+        return
+    if parsed_guild_id != interaction.guild_id:
+        await interaction.response.send_message(
+            f"O ID não corresponde a este servidor. ID atual: `{interaction.guild_id}`.",
+            ephemeral=True,
+        )
+        return
+
+    set_command_guild_authorization(parsed_guild_id, True)
+    await interaction.response.send_message(
+        f"Servidor `{parsed_guild_id}` ativado e autorizado para usar os comandos do bot.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(
