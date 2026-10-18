@@ -36,7 +36,10 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/monthly`: 13% do saldo atual, com minimo de 10.000 moedas.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 15 segundos.\n"
-    "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas."
+    "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
+    "**SERVIDORES AUTORIZADOS**\n\n"
+    "Os comandos funcionam apenas em servidores liberados pelo dono. O servidor principal e o servidor dos anuncios.\n"
+    "Use `/autorizar_servidor`, `/revogar_servidor` e `/servidores_autorizados` no servidor principal."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
@@ -319,6 +322,22 @@ def initialize_economy() -> None:
                 value TEXT NOT NULL
             )
             """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS authorized_command_guilds (
+                guild_id INTEGER PRIMARY KEY,
+                authorized_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO authorized_command_guilds
+                (guild_id, authorized_at)
+            VALUES (?, ?)
+            """,
+            (UPDATE_ANNOUNCEMENT_GUILD_ID, int(time.time())),
         )
         connection.executemany(
             "INSERT OR IGNORE INTO casino_settings (setting, value) VALUES (?, ?)",
@@ -815,6 +834,36 @@ COMMAND_SPAM_GUARD = CommandSpamGuard()
 
 class BlacklistCommandTree(app_commands.CommandTree):
   async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    if interaction.guild_id is None:
+      if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "Os comandos do bot só podem ser usados em servidores autorizados.",
+            ephemeral=True,
+        )
+      return False
+
+    try:
+      guild_authorized = is_command_guild_authorized(interaction.guild_id)
+    except sqlite3.Error:
+      logger.exception(
+          "Não foi possível verificar a autorização do servidor %s.",
+          interaction.guild_id,
+      )
+      if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "Não foi possível verificar a autorização deste servidor. Tente novamente mais tarde.",
+            ephemeral=True,
+        )
+      return False
+
+    if not guild_authorized:
+      if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "Este servidor não está autorizado a usar os comandos do bot.",
+            ephemeral=True,
+        )
+      return False
+
     if await verificar_usuario_bloqueado(interaction):
       return False
 
@@ -977,6 +1026,43 @@ def get_betting_channel_id(guild_id: int) -> int | None:
             (guild_id,),
         ).fetchone()
     return setting[0] if setting else None
+
+
+def get_authorized_command_guild_ids() -> list[int]:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        rows = connection.execute(
+            "SELECT guild_id FROM authorized_command_guilds ORDER BY guild_id"
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def set_command_guild_authorization(guild_id: int, authorized: bool) -> None:
+    if guild_id == UPDATE_ANNOUNCEMENT_GUILD_ID and not authorized:
+        raise ValueError("O servidor principal não pode ser revogado.")
+
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        if authorized:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO authorized_command_guilds
+                    (guild_id, authorized_at)
+                VALUES (?, ?)
+                """,
+                (guild_id, int(time.time())),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM authorized_command_guilds WHERE guild_id = ?",
+                (guild_id,),
+            )
+
+
+def is_command_guild_authorized(guild_id: int) -> bool:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection:
+        return connection.execute(
+            "SELECT 1 FROM authorized_command_guilds WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone() is not None
 
 
 def set_betting_channel(guild_id: int, channel_id: int | None) -> None:
@@ -5441,6 +5527,9 @@ class BotDiscord(discord.Client):
         set_house_BOT_OWNER_ID(self.house_BOT_OWNER_ID)
 
 
+        synced = await self.tree.sync()
+        logger.info("Sincronizados %d comandos slash globalmente.", len(synced))
+
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
             try:
@@ -5449,12 +5538,12 @@ class BotDiscord(discord.Client):
                 raise RuntimeError("DISCORD_GUILD_ID precisa ser um ID numérico.") from error
 
             self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            logger.info("Sincronizados %d comandos slash no servidor %s.", len(synced), guild_id)
-            return
-
-        synced = await self.tree.sync()
-        logger.info("Sincronizados %d comandos slash globalmente.", len(synced))
+            guild_synced = await self.tree.sync(guild=guild)
+            logger.info(
+                "Sincronizados %d comandos slash no servidor de teste %s.",
+                len(guild_synced),
+                guild_id,
+            )
 
     async def on_ready(self) -> None:
         if self.user is not None:
@@ -9836,6 +9925,87 @@ async def ajuda(interaction: discord.Interaction) -> None:
     if current_embed.fields or not embeds:
         embeds.append(current_embed)
     await interaction.response.send_message(embeds=embeds, ephemeral=True)
+
+
+@bot.tree.command(
+    name="autorizar_servidor",
+    description="Libera um servidor para usar os comandos do bot (dono).",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.describe(guild_id="ID numérico do servidor que será autorizado.")
+async def autorizar_servidor(
+    interaction: discord.Interaction,
+    guild_id: str,
+) -> None:
+    if not guild_id.isascii() or not guild_id.isdecimal():
+        await interaction.response.send_message(
+            "Informe o ID numérico do servidor.", ephemeral=True
+        )
+        return
+    guild_id = int(guild_id)
+    if not 0 < guild_id <= 9_223_372_036_854_775_807:
+        await interaction.response.send_message(
+            "O ID informado está fora do intervalo aceito.", ephemeral=True
+        )
+        return
+    set_command_guild_authorization(guild_id, True)
+    await interaction.response.send_message(
+        f"Servidor `{guild_id}` autorizado para usar os comandos do bot.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="revogar_servidor",
+    description="Remove a autorização de um servidor (dono).",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.describe(guild_id="ID numérico do servidor cuja autorização será removida.")
+async def revogar_servidor(
+    interaction: discord.Interaction,
+    guild_id: str,
+) -> None:
+    if not guild_id.isascii() or not guild_id.isdecimal():
+        await interaction.response.send_message(
+            "Informe o ID numérico do servidor.", ephemeral=True
+        )
+        return
+    guild_id = int(guild_id)
+    if not 0 < guild_id <= 9_223_372_036_854_775_807:
+        await interaction.response.send_message(
+            "O ID informado está fora do intervalo aceito.", ephemeral=True
+        )
+        return
+    if guild_id == UPDATE_ANNOUNCEMENT_GUILD_ID:
+        await interaction.response.send_message(
+            "O servidor principal dos anúncios não pode ser revogado.",
+            ephemeral=True,
+        )
+        return
+    set_command_guild_authorization(guild_id, False)
+    await interaction.response.send_message(
+        f"A autorização do servidor `{guild_id}` foi removida.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="servidores_autorizados",
+    description="Lista os servidores liberados para usar os comandos (dono).",
+)
+@app_commands.check(is_bot_owner)
+async def servidores_autorizados(interaction: discord.Interaction) -> None:
+    guild_ids = get_authorized_command_guild_ids()
+    lines = []
+    for guild_id in guild_ids:
+        guild = bot.get_guild(guild_id)
+        guild_name = guild.name if guild is not None else "servidor não encontrado"
+        lines.append(f"• **{guild_name}** — `{guild_id}`")
+    description = "\n".join(lines) or "Nenhum servidor autorizado."
+    await interaction.response.send_message(
+        description[:4_000],
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(
