@@ -788,6 +788,7 @@ class CommandSpamGuard:
     self._restrictions: dict[int, deque[float]] = {}
     self._blocked_until: dict[int, float] = {}
     self._last_cleanup = 0.0
+    self.last_punishment_applied = False
     self.window_seconds = COMMAND_SPAM_DEFAULT_SETTINGS["window_seconds"]
     self.command_limit = COMMAND_SPAM_DEFAULT_SETTINGS["command_limit"]
     self.punishment_seconds = COMMAND_SPAM_DEFAULT_SETTINGS["punishment_seconds"]
@@ -819,6 +820,7 @@ class CommandSpamGuard:
 
   def check(self, user_id: int, now: float | None = None) -> int | None:
     current = time.monotonic() if now is None else now
+    self.last_punishment_applied = False
 
     if current - self._last_cleanup >= 60:
       for tracked_user_id, timestamps in list(self._timestamps.items()):
@@ -867,9 +869,11 @@ class CommandSpamGuard:
         self._blocked_until[user_id] = (
             current + COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
         )
+        self.last_punishment_applied = True
         return COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
 
       self._blocked_until[user_id] = current + self.punishment_seconds
+      self.last_punishment_applied = True
       return self.punishment_seconds
 
     timestamps.append(current)
@@ -877,6 +881,39 @@ class CommandSpamGuard:
 
 
 COMMAND_SPAM_GUARD = CommandSpamGuard()
+
+
+async def notify_owner_of_command_punishment(
+    interaction: discord.Interaction,
+    duration_seconds: int,
+) -> None:
+  try:
+    owner = interaction.client.get_user(BOT_OWNER_ID)
+    if owner is None:
+      owner = await interaction.client.fetch_user(BOT_OWNER_ID)
+    user = interaction.user
+    guild_name = interaction.guild.name if interaction.guild else "servidor desconhecido"
+    command_name = "desconhecido"
+    if isinstance(interaction.data, dict):
+      command_name = interaction.data.get("name", command_name)
+    duration_text = (
+        "24 horas"
+        if duration_seconds == COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
+        else f"{duration_seconds} segundos"
+    )
+    await owner.send(
+        "Punicao automatica por spam de comandos aplicada.\n"
+        f"Usuario: {user} (`{user.id}`)\n"
+        f"Servidor: {guild_name} (`{interaction.guild_id}`)\n"
+        f"Comando que atingiu o limite: `/{command_name}`\n"
+        f"Duracao: **{duration_text}**."
+    )
+  except (discord.HTTPException, discord.Forbidden):
+    logger.warning(
+        "Nao foi possivel notificar o dono sobre autoblock do usuario %s.",
+        interaction.user.id,
+        exc_info=True,
+    )
 
 
 class BlacklistCommandTree(app_commands.CommandTree):
@@ -921,6 +958,8 @@ class BlacklistCommandTree(app_commands.CommandTree):
 
     retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id)
     if retry_after is not None:
+      if COMMAND_SPAM_GUARD.last_punishment_applied:
+        await notify_owner_of_command_punishment(interaction, retry_after)
       if not interaction.response.is_done():
         duration_label = (
             " (24 horas)"
