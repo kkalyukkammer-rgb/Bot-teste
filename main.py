@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import io
 import json
 import logging
@@ -733,9 +734,69 @@ class BlacklistView(discord.ui.View):
     return not await verificar_usuario_bloqueado(interaction)
 
 
+COMMAND_SPAM_MAX = 5
+COMMAND_SPAM_WINDOW_SECONDS = 10
+COMMAND_SPAM_BLOCK_SECONDS = 15
+
+
+class CommandSpamGuard:
+  def __init__(self) -> None:
+    self._timestamps: dict[int, deque[float]] = {}
+    self._blocked_until: dict[int, float] = {}
+    self._last_cleanup = 0.0
+
+  def check(self, user_id: int, now: float | None = None) -> int | None:
+    current = time.monotonic() if now is None else now
+
+    if current - self._last_cleanup >= 60:
+      for tracked_user_id, timestamps in list(self._timestamps.items()):
+        while timestamps and current - timestamps[0] >= COMMAND_SPAM_WINDOW_SECONDS:
+          timestamps.popleft()
+        if not timestamps:
+          self._timestamps.pop(tracked_user_id, None)
+      self._blocked_until = {
+          tracked_user_id: blocked_until
+          for tracked_user_id, blocked_until in self._blocked_until.items()
+          if blocked_until > current
+      }
+      self._last_cleanup = current
+
+    blocked_until = self._blocked_until.get(user_id, 0.0)
+    if blocked_until > current:
+      return math.ceil(blocked_until - current)
+    self._blocked_until.pop(user_id, None)
+
+    timestamps = self._timestamps.setdefault(user_id, deque())
+    while timestamps and current - timestamps[0] >= COMMAND_SPAM_WINDOW_SECONDS:
+      timestamps.popleft()
+
+    if len(timestamps) >= COMMAND_SPAM_MAX:
+      self._blocked_until[user_id] = current + COMMAND_SPAM_BLOCK_SECONDS
+      timestamps.clear()
+      return COMMAND_SPAM_BLOCK_SECONDS
+
+    timestamps.append(current)
+    return None
+
+
+COMMAND_SPAM_GUARD = CommandSpamGuard()
+
+
 class BlacklistCommandTree(app_commands.CommandTree):
   async def interaction_check(self, interaction: discord.Interaction) -> bool:
-    return not await verificar_usuario_bloqueado(interaction)
+    if await verificar_usuario_bloqueado(interaction):
+      return False
+
+    retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id)
+    if retry_after is not None:
+      if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "⏳ Você está usando comandos rápido demais. Aguarde "
+            f"**{retry_after} segundos** antes de tentar novamente.",
+            ephemeral=True,
+        )
+      return False
+    return True
 
 
 class MeuBot(commands.Bot):
