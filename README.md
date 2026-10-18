@@ -36,16 +36,19 @@ devida à casa principal.
 ## Trabalho, roubo e apostas
 
 `/workshift` paga o salário do trabalho atual por um período aleatório de
-30 minutos até o limite restante de 8 horas por ciclo. O limite de trabalho
-se renova a cada 8 horas. Use `/mudar_trabalho` para escolher uma profissão;
-cada uma tem taxa de inscrição e salário por hora próprios. Os salários por
-hora foram dobrados: de 4.000 moedas no bico até 36.000 como influenciador.
-Donos de cassino não podem trocar de trabalho.
+30 minutos a 8 horas. O limite acumulado é de 8 horas e se renova a cada
+8 horas. Use `/mudar_trabalho` para escolher uma profissão; cada uma tem taxa
+de inscrição e salário por hora próprios. Os salários por hora são 3.000 no
+bico, 7.500 como entregador, 12.000 como segurança, 18.000 como programador
+e 27.000 como influenciador. Donos de cassino não podem trocar de trabalho.
 
-`/roubar` tem 65% de chance de sucesso. Uma tentativa bem-sucedida consome uma
-das 5 tentativas disponíveis e rende de 2.000 a 20.000 moedas; uma tentativa
-fracassada consome todas. Quando as tentativas acabam, as tentativas são
-recuperadas após 8 horas.
+`/roubar` tem 65% de chance de sucesso e paga de 2.500 a 15.000 moedas em
+caso de êxito. Uma tentativa bem-sucedida consome uma das 5 tentativas
+disponíveis; uma tentativa fracassada consome todas. As tentativas voltam
+8 horas após o esgotamento.
+
+`/ajuda` agrupa os comandos por área, incluindo renda e economia, jogos,
+cassinos, upgrades, status, moderação e utilidades do bot.
 
 Os resultados das apostas oferecem um botão para repetir na mesma mensagem
 com o mesmo valor e escolha. Em desafios entre jogadores, o botão reinicia o
@@ -89,10 +92,11 @@ envio fica registrado no banco, sem consultar commits Git. Ao preparar uma
 atualização, ajuste esse texto para resumir novidades e também correções em
 comandos e mecânicas. Esta versão anuncia trabalho e roubo, os jogos
 `/maior_menor` e `/jokenpo`, as imagens dos resultados, a renomeação para
-`/jogo_do_bixo` com 16 animais, a renovação de trabalho e roubo após 8 horas,
-o aumento dos ganhos, o balanceamento de pagamentos, os botões para repetir
-apostas na mesma mensagem e as correções em jogos globais e cassinos locais.
-O owner também pode usar `/anunciar_update` para reenviar
+`/jogo_do_bixo` e seus 16 animais, a redução dos cooldowns de trabalho e roubo
+para 8 horas, o aumento dos salários e ganhos de roubo, o balanceamento de
+pagamentos, os botões para repetir apostas na mesma mensagem e a organização
+de `/ajuda` por funcionalidade, além das correções em jogos globais e
+cassinos locais. O owner também pode usar `/anunciar_update` para reenviar
 manualmente a mensagem atual. O bot
 precisa ter permissão para enviar mensagens e embeds; o cargo deve existir no
 servidor e ser mencionável pelo bot.

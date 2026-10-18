@@ -27,20 +27,21 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "**Renda:** /workshift e /roubar agora renovam o limite/tentativas a "
-    "cada 8 horas. Salários por hora dobrados e ganhos de roubo aumentados "
-    "para 2.000–20.000 moedas por sucesso.\n\n"
-    "**Jogos:** /corrida foi renomeado para /jogo_do_bixo, agora com 16 "
-    "animais. Adicionados /maior_menor e /jokenpo, também liberados "
-    "progressivamente em /jogar_cassino. Resultados de apostas incluem "
-    "imagens; o caça-níquel mantém o GIF. Empates devolvem a aposta e há "
-    "botão para repetir no mesmo resultado/mensagem.\n\n"
-    "**Balanceamento e correções:** pagamentos de /moeda, /dados, /roleta, "
-    "/jogo_do_bixo, /cacaniquel, /maior_menor e /jokenpo ajustados para "
-    "cerca de 95% de retorno esperado antes dos bônus de prestígio. "
-    "Corrigidos resultados de /moeda, /dados e /roleta e alinhados "
-    "pagamentos/repetições nos cassinos locais. /ajuda agora separa "
-    "comandos por funcionalidade e resume as novidades."
+    "**Jogos e balanceamento:** retorno esperado dos jogos de chance "
+    "recalibrado para cerca de 95% antes dos bônus de prestígio; adicionados "
+    "/maior_menor e /jokenpo, com empate devolvendo a aposta. /corrida foi "
+    "renomeado para /jogo_do_bixo e ampliado para 16 animais. Resultados de "
+    "apostas agora exibem artes; o caça-níquel mantém seu GIF. Botões permitem "
+    "repetir a aposta na mesma mensagem.\n\n"
+    "**Economia:** /workshift e /roubar recuperam o limite após 8 horas. "
+    "Salários por trabalho aumentaram 50%; os ganhos por roubo subiram "
+    "para "
+    "2.500–15.000 moedas. O roubo mantém até 5 tentativas e falha esgota "
+    "todas.\n\n"
+    "**Cassinos e correções:** jogos novos integrados ao cassino local por "
+    "nível; upgrades listam os jogos liberados. Corrigidos resultados e "
+    "pagamentos dos jogos globais, apostas repetidas e cassino local. "
+    "/ajuda foi reorganizado por funcionalidade."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
@@ -204,11 +205,11 @@ ROBBERY_MAX_ATTEMPTS = 5
 ROBBERY_RECOVERY_SECONDS = 8 * 60 * 60
 ROBBERY_SUCCESS_CHANCE = 0.65
 JOBS = {
-    "desempregado": ("Bico", 0, 4_000),
-    "entregador": ("Entregador", 5_000, 10_000),
-    "seguranca": ("Segurança", 20_000, 16_000),
-    "programador": ("Programador", 75_000, 24_000),
-    "influenciador": ("Influenciador", 200_000, 36_000),
+    "desempregado": ("Bico", 0, 3_000),
+    "entregador": ("Entregador", 5_000, 7_500),
+    "seguranca": ("Segurança", 20_000, 12_000),
+    "programador": ("Programador", 75_000, 18_000),
+    "influenciador": ("Influenciador", 200_000, 27_000),
 }
 
 
@@ -2071,10 +2072,7 @@ def work_player_shift(
         if job_key not in JOBS:
             raise ValueError(f"Trabalho inválido salvo para o usuário {user_id}.")
 
-        if (
-            work_started_at is None
-            or now - work_started_at >= WORK_RECOVERY_SECONDS
-        ):
+        if work_started_at is None or now - work_started_at >= WORK_RECOVERY_SECONDS:
             work_used = 0
             work_started_at = now
 
@@ -2153,7 +2151,7 @@ def attempt_robbery(
             )
 
         if random.random() < ROBBERY_SUCCESS_CHANCE:
-            won_amount = random.randint(2_000, 20_000)
+            won_amount = random.randint(2_500, 15_000)
             attempts -= 1
             recover_at = now + ROBBERY_RECOVERY_SECONDS if attempts == 0 else None
             connection.execute(
@@ -5392,7 +5390,7 @@ async def mudar_trabalho(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(
     name="workshift",
-    description="Trabalhe até 8 horas; o limite renova a cada ciclo de 8 horas.",
+    description="Trabalhe até 8 horas e recupere seu limite a cada 8 horas.",
 )
 async def workshift(interaction: discord.Interaction) -> None:
     status, job_key, duration, payout, balance, remaining, resets_at = (
@@ -5400,7 +5398,7 @@ async def workshift(interaction: discord.Interaction) -> None:
     )
     if status == "limit":
         await interaction.response.send_message(
-            "Você já trabalhou o limite de **8 horas neste ciclo**. "
+            "Você já trabalhou o limite de **8 horas**. "
             f"As horas serão recuperadas em {format_remaining(resets_at - int(time.time()))}.",
             ephemeral=True,
         )
@@ -5435,13 +5433,13 @@ async def workshift(interaction: discord.Interaction) -> None:
         value=f"{format_remaining(remaining)} de 8h",
         inline=False,
     )
-    embed.set_footer(text="O limite de trabalho é renovado a cada 8 horas.")
+    embed.set_footer(text="O limite de 8 horas é renovado a cada 8 horas.")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(
     name="roubar",
-    description="Tente roubar moedas; até 20.000 por sucesso.",
+    description="Tente roubar moedas; você pode ganhar ou perder dinheiro.",
 )
 async def roubar(interaction: discord.Interaction) -> None:
     status, balance, attempts, amount, recover_at = attempt_robbery(
@@ -5451,7 +5449,7 @@ async def roubar(interaction: discord.Interaction) -> None:
         remaining = max(0, (recover_at or 0) - int(time.time()))
         await interaction.response.send_message(
             f"Você esgotou suas tentativas. As **5 tentativas** voltam em "
-            f"{format_remaining(remaining)}.",
+            f"{format_remaining(remaining)} (recuperação após 8 horas).",
             ephemeral=True,
         )
         return
@@ -8413,200 +8411,119 @@ async def userinfo(
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="ajuda", description="Lista os comandos slash disponíveis.")
+@bot.tree.command(
+    name="ajuda",
+    description="Mostra os comandos organizados por funcionalidade.",
+)
 async def ajuda(interaction: discord.Interaction) -> None:
+    categories = (
+        (
+            "💰 Renda e economia",
+            {
+                "daily", "weekly", "monthly", "saldo", "workshift",
+                "mudar_trabalho", "roubar", "feedback",
+            },
+        ),
+        (
+            "🎲 Jogos de aposta",
+            {
+                "moeda", "dados", "roleta", "jogo_do_bixo", "cacaniquel",
+                "maior_menor", "jokenpo", "duelo", "blackjack",
+            },
+        ),
+        (
+            "🎰 Cassino do servidor",
+            {
+                "criar_cassino", "excluir_cassino", "jogar_cassino",
+                "solicitar_jogo_cassino", "daily_cassino", "weekly_cassino",
+                "saldo_cassino", "status_cassino", "leaderboard_cassino",
+                "contratar_npcs_cassino", "upgrade_cassino",
+            },
+        ),
+        (
+            "⭐ Prestígio e upgrades",
+            {"prestigio", "upgrade_prestigio", "upgrade_casa_principal"},
+        ),
+        (
+            "📊 Status e rankings",
+            {
+                "status_apostador", "status_casa_principal", "leaderboard",
+                "userinfo", "serverinfo",
+            },
+        ),
+        (
+            "⚙️ Configuração e moderação",
+            {
+                "canal_apostas", "configurar_autorole_cassino",
+                "configurar_cassinos", "configurar_npcs_principais",
+                "resetar_dados_jogadores", "clear", "kick", "ban", "unban",
+                "mute", "unmute",
+            },
+        ),
+        (
+            "🤖 Utilidades do bot",
+            {
+                "ajuda", "anunciar_update", "shutdown", "restart", "status",
+                "clear_status", "set_activity", "clear_activity",
+                "set_status_type", "clear_status_type",
+            },
+        ),
+    )
     commands = {
         command.name: command
         for command in bot.tree.get_commands()
         if isinstance(command, app_commands.Command)
     }
-    categories = (
-        (
-            "💰 Formas de ganhar moedas",
-            (
-                "daily",
-                "weekly",
-                "monthly",
-                "workshift",
-                "mudar_trabalho",
-                "roubar",
-            ),
-        ),
-        (
-            "🎲 Jogos de aposta",
-            (
-                "moeda",
-                "dados",
-                "roleta",
-                "jogo_do_bixo",
-                "cacaniquel",
-                "maior_menor",
-                "jokenpo",
-                "blackjack",
-                "duelo",
-            ),
-        ),
-        (
-            "🏦 Cassino do servidor",
-            (
-                "criar_cassino",
-                "jogar_cassino",
-                "daily_cassino",
-                "weekly_cassino",
-                "saldo_cassino",
-                "status_cassino",
-                "leaderboard_cassino",
-                "upgrade_cassino",
-                "contratar_npcs_cassino",
-                "excluir_cassino",
-                "solicitar_jogo_cassino",
-            ),
-        ),
-        (
-            "👤 Saldo e progresso",
-            (
-                "saldo",
-                "status_apostador",
-                "leaderboard",
-                "prestigio",
-                "upgrade_prestigio",
-            ),
-        ),
-        (
-            "🛠️ Configuração e administração",
-            (
-                "canal_apostas",
-                "configurar_autorole_cassino",
-                "configurar_cassinos",
-                "configurar_npcs_principais",
-                "upgrade_casa_principal",
-                "status_casa_principal",
-                "resetar_dados_jogadores",
-                "anunciar_update",
-            ),
-        ),
-        (
-            "🛡️ Moderação e servidor",
-            (
-                "clear",
-                "kick",
-                "ban",
-                "unban",
-                "mute",
-                "unmute",
-                "serverinfo",
-                "userinfo",
-            ),
-        ),
-        (
-            "⚙️ Bot e suporte",
-            (
-                "feedback",
-                "shutdown",
-                "restart",
-                "status",
-                "clear_status",
-                "set_activity",
-                "clear_activity",
-                "set_status_type",
-                "clear_status_type",
-            ),
-        ),
-    )
-    embed = discord.Embed(
-        title="📖 Guia de comandos",
+    assigned_names = set().union(*(names for _, names in categories))
+    uncategorized = set(commands) - assigned_names
+    grouped_commands = [
+        (title, names & commands.keys())
+        for title, names in categories
+    ]
+    if uncategorized:
+        grouped_commands.append(("📚 Outros comandos", uncategorized))
+
+    embeds: list[discord.Embed] = []
+    current_embed = discord.Embed(
+        title="Guia de comandos",
         description=(
-            "Comandos organizados por funcionalidade. Ganhos de trabalho e "
-            "tentativas de roubo renovam a cada **8 horas**. Use os comandos "
-            "de jogo para apostar e consulte os saldos antes de jogar."
+            "Comandos organizados por funcionalidade. Use `/` e selecione "
+            "um comando para ver os parâmetros disponíveis."
         ),
-        color=discord.Color.blurple(),
+        color=discord.Color.blue(),
     )
-    assigned_commands = {"ajuda"}
-    for category_name, command_names in categories:
-        category_lines = [
-            f"`/{name}` — {commands[name].description}"
-            for name in command_names
-            if name in commands
+    current_characters = len(current_embed.title) + len(current_embed.description)
+    for title, names in grouped_commands:
+        entries = [
+            f"`/{commands[name].name}` — {commands[name].description}"
+            for name in sorted(names)
         ]
-        assigned_commands.update(
-            name for name in command_names if name in commands
-        )
-        if not category_lines:
-            continue
-
-        field_title = category_name
-        field_lines: list[str] = []
-        field_length = 0
-        for line in category_lines:
-            if field_lines and field_length + len(line) + 1 > 1_000:
-                embed.add_field(
-                    name=field_title,
-                    value="\n".join(field_lines),
-                    inline=False,
+        chunks: list[str] = []
+        current_chunk = ""
+        for entry in entries:
+            candidate = f"{current_chunk}\n{entry}".strip()
+            if current_chunk and len(candidate) > 950:
+                chunks.append(current_chunk)
+                current_chunk = entry
+            else:
+                current_chunk = candidate
+        if current_chunk:
+            chunks.append(current_chunk)
+        for chunk_index, chunk in enumerate(chunks):
+            field_title = title if chunk_index == 0 else f"{title} (continuação)"
+            field_cost = len(field_title) + len(chunk)
+            if current_embed.fields and current_characters + field_cost > 5_500:
+                embeds.append(current_embed)
+                current_embed = discord.Embed(
+                    title="Guia de comandos (continuação)",
+                    color=discord.Color.blue(),
                 )
-                field_title = f"{category_name} (continuação)"
-                field_lines = []
-                field_length = 0
-            field_lines.append(line)
-            field_length += len(line) + 1
-        embed.add_field(
-            name=field_title,
-            value="\n".join(field_lines),
-            inline=False,
-        )
-
-    remaining_commands = sorted(
-        (
-            command
-            for name, command in commands.items()
-            if name not in assigned_commands
-        ),
-        key=lambda command: command.name,
-    )
-    if remaining_commands:
-        other_lines = [
-            f"`/{command.name}` — {command.description}"
-            for command in remaining_commands
-        ]
-        field_lines = []
-        field_length = 0
-        field_title = "📚 Outros comandos"
-        for line in other_lines:
-            if field_lines and field_length + len(line) + 1 > 1_000:
-                embed.add_field(
-                    name=field_title,
-                    value="\n".join(field_lines),
-                    inline=False,
-                )
-                field_title = "📚 Outros comandos (continuação)"
-                field_lines = []
-                field_length = 0
-            field_lines.append(line)
-            field_length += len(line) + 1
-        embed.add_field(
-            name=field_title,
-            value="\n".join(field_lines),
-            inline=False,
-        )
-
-    embed.add_field(
-        name="✨ Atualizações recentes",
-        value=(
-            "Balanceamento de jogos: cerca de 95% de retorno esperado antes "
-            "dos bônus de prestígio; adicionados `/maior_menor` e `/jokenpo`; "
-            "`/corrida` virou `/jogo_do_bixo` com 16 animais. Apostas exibem "
-            "artes de resultado, empates devolvem a aposta e podem ser "
-            "repetidas na mesma mensagem. Cassinos locais liberam jogos por "
-            "nível e upgrades mostram os jogos desbloqueados. `/mudar_trabalho` "
-            "permite escolher profissão; `/workshift` e `/roubar` renovam a "
-            "cada 8h, salários dobraram e roubos bem-sucedidos pagam "
-            "2.000–20.000 moedas. Também houve correções nos resultados de "
-            "moeda, dados, roleta e nos pagamentos de cassinos locais."
-        ),
-        inline=False,
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+                current_characters = len(current_embed.title)
+            current_embed.add_field(name=field_title, value=chunk, inline=False)
+            current_characters += field_cost
+    if current_embed.fields or not embeds:
+        embeds.append(current_embed)
+    await interaction.response.send_message(embeds=embeds, ephemeral=True)
 
 
 @bot.tree.command(
