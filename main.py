@@ -26,6 +26,7 @@ BOT_OWNER_ID = 1079199747019112520
 UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
+BLACKLIST = [961704797491314719]
 UPDATE_ANNOUNCEMENT_MESSAGE = (
     "*MINI UPDATE*\n\n"
     "**BALANCEAMENTOS E QOL** \n\n"
@@ -558,7 +559,12 @@ def initialize_economy() -> None:
                     "ALTER TABLE guild_casino_accounts "
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
-
+                
+async def block_blacklisted_users(ctx):
+  if ctx.author.id in BLACKLIST:
+    await ctx.whisper("Você não pode enviar comando")
+    return False  # Bloqueia a execução
+  return True
 
 def migrate_legacy_economy_database(
     database_path: str,
@@ -850,8 +856,7 @@ async def synchronize_casino_autoroles(
                 member_id,
                 guild.id,
             )
-
-
+    
 async def ensure_betting_channel(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
     if guild is None:
