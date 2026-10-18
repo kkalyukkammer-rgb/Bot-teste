@@ -43,8 +43,7 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
-    "Apos 5 comandos em 10 segundos ou 20 comandos em 60 segundos, ha um bloqueio temporario de 17 segundos.\n"
-    "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
+    "O autoblock pode ser configurado pelo dono do bot com `/configurar_autoblock`, definindo janela, quantidade de comandos, duracao da punicao e limite de punicoes. Ao atingir o limite, o usuario fica bloqueado por 24 horas.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
     "O servidor principal e o servidor dos anuncios. No servidor de destino, o dono do bot pode usar `/ativar_servidor` e informar o ID do proprio servidor.\n"
     "Tambem e possivel liberar pelo servidor principal com `/autorizar_servidor` ou revogar com `/revogar_servidor`."
@@ -350,6 +349,10 @@ def initialize_economy() -> None:
         connection.executemany(
             "INSERT OR IGNORE INTO casino_settings (setting, value) VALUES (?, ?)",
             (
+                ("command_spam_window_seconds", COMMAND_SPAM_DEFAULT_SETTINGS["window_seconds"]),
+                ("command_spam_command_limit", COMMAND_SPAM_DEFAULT_SETTINGS["command_limit"]),
+                ("command_spam_punishment_seconds", COMMAND_SPAM_DEFAULT_SETTINGS["punishment_seconds"]),
+                ("command_spam_punishment_limit", COMMAND_SPAM_DEFAULT_SETTINGS["punishment_limit"]),
                 ("creation_fee", DEFAULT_CASINO_CREATION_FEE),
                 ("tax_percent", DEFAULT_CASINO_TAX_PERCENT),
                 ("main_house_npcs", DEFAULT_MAIN_HOUSE_NPCS),
@@ -771,6 +774,12 @@ COMMAND_SPAM_BLOCK_SECONDS = 17
 COMMAND_SPAM_ESCALATION_WINDOW_SECONDS = 10 * 60
 COMMAND_SPAM_ESCALATION_LIMIT = 3
 COMMAND_SPAM_ESCALATED_BLOCK_SECONDS = 24 * 60 * 60
+COMMAND_SPAM_DEFAULT_SETTINGS = {
+    "window_seconds": COMMAND_SPAM_WINDOW_SECONDS,
+    "command_limit": COMMAND_SPAM_MAX,
+    "punishment_seconds": COMMAND_SPAM_BLOCK_SECONDS,
+    "punishment_limit": COMMAND_SPAM_ESCALATION_LIMIT,
+}
 
 
 class CommandSpamGuard:
@@ -779,17 +788,31 @@ class CommandSpamGuard:
     self._restrictions: dict[int, deque[float]] = {}
     self._blocked_until: dict[int, float] = {}
     self._last_cleanup = 0.0
+    self.window_seconds = COMMAND_SPAM_DEFAULT_SETTINGS["window_seconds"]
+    self.command_limit = COMMAND_SPAM_DEFAULT_SETTINGS["command_limit"]
+    self.punishment_seconds = COMMAND_SPAM_DEFAULT_SETTINGS["punishment_seconds"]
+    self.punishment_limit = COMMAND_SPAM_DEFAULT_SETTINGS["punishment_limit"]
+
+  def configure(
+      self,
+      *,
+      window_seconds: int,
+      command_limit: int,
+      punishment_seconds: int,
+      punishment_limit: int,
+  ) -> None:
+    self.window_seconds = window_seconds
+    self.command_limit = command_limit
+    self.punishment_seconds = punishment_seconds
+    self.punishment_limit = punishment_limit
+    self._timestamps.clear()
 
   def check(self, user_id: int, now: float | None = None) -> int | None:
     current = time.monotonic() if now is None else now
 
     if current - self._last_cleanup >= 60:
       for tracked_user_id, timestamps in list(self._timestamps.items()):
-        while (
-            timestamps
-            and current - timestamps[0]
-            >= COMMAND_SPAM_SUSTAINED_WINDOW_SECONDS
-        ):
+        while timestamps and current - timestamps[0] >= self.window_seconds:
           timestamps.popleft()
         if not timestamps:
           self._timestamps.pop(tracked_user_id, None)
@@ -815,18 +838,10 @@ class CommandSpamGuard:
     self._blocked_until.pop(user_id, None)
 
     timestamps = self._timestamps.setdefault(user_id, deque())
-    while (
-        timestamps
-        and current - timestamps[0] >= COMMAND_SPAM_SUSTAINED_WINDOW_SECONDS
-    ):
+    while timestamps and current - timestamps[0] >= self.window_seconds:
       timestamps.popleft()
 
-    burst_count = sum(
-        current - timestamp < COMMAND_SPAM_WINDOW_SECONDS
-        for timestamp in timestamps
-    )
-    sustained_spam = len(timestamps) >= COMMAND_SPAM_SUSTAINED_MAX
-    if burst_count >= COMMAND_SPAM_MAX or sustained_spam:
+    if len(timestamps) + 1 >= self.command_limit:
       timestamps.clear()
       restrictions = self._restrictions.setdefault(user_id, deque())
       while (
@@ -837,15 +852,15 @@ class CommandSpamGuard:
         restrictions.popleft()
       restrictions.append(current)
 
-      if len(restrictions) >= COMMAND_SPAM_ESCALATION_LIMIT:
+      if len(restrictions) >= self.punishment_limit:
         restrictions.clear()
         self._blocked_until[user_id] = (
             current + COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
         )
         return COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
 
-      self._blocked_until[user_id] = current + COMMAND_SPAM_BLOCK_SECONDS
-      return COMMAND_SPAM_BLOCK_SECONDS
+      self._blocked_until[user_id] = current + self.punishment_seconds
+      return self.punishment_seconds
 
     timestamps.append(current)
     return None
@@ -5514,6 +5529,45 @@ def render_roulette_gif(number: int, result_color: str) -> io.BytesIO:
 initialize_economy()
 
 
+def get_command_spam_settings() -> dict[str, int]:
+    setting_names = {
+        "window_seconds": "command_spam_window_seconds",
+        "command_limit": "command_spam_command_limit",
+        "punishment_seconds": "command_spam_punishment_seconds",
+        "punishment_limit": "command_spam_punishment_limit",
+    }
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection:
+        rows = connection.execute(
+            "SELECT setting, value FROM casino_settings WHERE setting IN (?, ?, ?, ?)",
+            tuple(setting_names.values()),
+        ).fetchall()
+    stored = {name: value for name, value in rows}
+    return {
+        key: int(stored.get(db_key, COMMAND_SPAM_DEFAULT_SETTINGS[key]))
+        for key, db_key in setting_names.items()
+    }
+
+
+def set_command_spam_settings(
+    *,
+    window_seconds: int,
+    command_limit: int,
+    punishment_seconds: int,
+    punishment_limit: int,
+) -> None:
+    values = {
+        "command_spam_window_seconds": window_seconds,
+        "command_spam_command_limit": command_limit,
+        "command_spam_punishment_seconds": punishment_seconds,
+        "command_spam_punishment_limit": punishment_limit,
+    }
+    with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
+        connection.executemany(
+            "UPDATE casino_settings SET value = ? WHERE setting = ?",
+            [(value, name) for name, value in values.items()],
+        )
+
+
 def get_last_announced_update() -> str | None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         state = connection.execute(
@@ -5558,6 +5612,8 @@ class BotDiscord(discord.Client):
     async def setup_hook(self) -> None:
         self.house_BOT_OWNER_ID = BOT_OWNER_ID
         set_house_BOT_OWNER_ID(self.house_BOT_OWNER_ID)
+
+        COMMAND_SPAM_GUARD.configure(**get_command_spam_settings())
 
 
         synced = await self.tree.sync()
@@ -9994,6 +10050,49 @@ async def ajuda(interaction: discord.Interaction) -> None:
     if current_embed.fields or not embeds:
         embeds.append(current_embed)
     await interaction.response.send_message(embeds=embeds, ephemeral=True)
+
+
+@bot.tree.command(
+    name="configurar_autoblock",
+    description="Configura a deteccao e as punicoes por spam de comandos (dono).",
+)
+@app_commands.check(is_bot_owner)
+@app_commands.describe(
+    janela_segundos="Janela de deteccao, de 1 a 3600 segundos.",
+    quantidade_comandos="Comandos que acionam a punicao, de 2 a 100.",
+    punicao_segundos="Duracao da punicao comum, de 1 a 86400 segundos.",
+    limite_punicoes="Punicoes antes do bloqueio automatico de 24 horas, de 2 a 20.",
+)
+async def configurar_autoblock(
+    interaction: discord.Interaction,
+    janela_segundos: app_commands.Range[int, 1, 3600],
+    quantidade_comandos: app_commands.Range[int, 2, 100],
+    punicao_segundos: app_commands.Range[int, 1, 86400],
+    limite_punicoes: app_commands.Range[int, 2, 20],
+) -> None:
+    settings = {
+        "window_seconds": janela_segundos,
+        "command_limit": quantidade_comandos,
+        "punishment_seconds": punicao_segundos,
+        "punishment_limit": limite_punicoes,
+    }
+    try:
+        set_command_spam_settings(**settings)
+    except sqlite3.Error:
+        logger.exception("Falha ao salvar configuracao do autoblock.")
+        await interaction.response.send_message(
+            "Nao foi possivel salvar a configuracao do autoblock. Tente novamente.",
+            ephemeral=True,
+        )
+        return
+
+    COMMAND_SPAM_GUARD.configure(**settings)
+    await interaction.response.send_message(
+        "Autoblock configurado:\n"
+        f"• **{quantidade_comandos} comandos** em **{janela_segundos} segundos** acionam uma punicao de **{punicao_segundos} segundos**.\n"
+        f"• Ao atingir **{limite_punicoes} punicoes** em 10 minutos, o usuario fica bloqueado por **24 horas**.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(
