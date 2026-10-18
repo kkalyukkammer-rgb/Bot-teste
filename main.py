@@ -44,6 +44,7 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 17 segundos.\n"
+    "20 comandos em 60 segundos tambem acionam a restricao temporaria.\n"
     "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
     "Os comandos funcionam apenas em servidores liberados pelo dono. O servidor principal e o servidor dos anuncios.\n"
@@ -765,6 +766,8 @@ class BlacklistView(discord.ui.View):
 
 COMMAND_SPAM_MAX = 5
 COMMAND_SPAM_WINDOW_SECONDS = 10
+COMMAND_SPAM_SUSTAINED_MAX = 20
+COMMAND_SPAM_SUSTAINED_WINDOW_SECONDS = 60
 COMMAND_SPAM_BLOCK_SECONDS = 17
 COMMAND_SPAM_ESCALATION_WINDOW_SECONDS = 10 * 60
 COMMAND_SPAM_ESCALATION_LIMIT = 3
@@ -783,7 +786,11 @@ class CommandSpamGuard:
 
     if current - self._last_cleanup >= 60:
       for tracked_user_id, timestamps in list(self._timestamps.items()):
-        while timestamps and current - timestamps[0] >= COMMAND_SPAM_WINDOW_SECONDS:
+        while (
+            timestamps
+            and current - timestamps[0]
+            >= COMMAND_SPAM_SUSTAINED_WINDOW_SECONDS
+        ):
           timestamps.popleft()
         if not timestamps:
           self._timestamps.pop(tracked_user_id, None)
@@ -809,10 +816,18 @@ class CommandSpamGuard:
     self._blocked_until.pop(user_id, None)
 
     timestamps = self._timestamps.setdefault(user_id, deque())
-    while timestamps and current - timestamps[0] >= COMMAND_SPAM_WINDOW_SECONDS:
+    while (
+        timestamps
+        and current - timestamps[0] >= COMMAND_SPAM_SUSTAINED_WINDOW_SECONDS
+    ):
       timestamps.popleft()
 
-    if len(timestamps) >= COMMAND_SPAM_MAX:
+    burst_count = sum(
+        current - timestamp < COMMAND_SPAM_WINDOW_SECONDS
+        for timestamp in timestamps
+    )
+    sustained_spam = len(timestamps) >= COMMAND_SPAM_SUSTAINED_MAX
+    if burst_count >= COMMAND_SPAM_MAX or sustained_spam:
       timestamps.clear()
       restrictions = self._restrictions.setdefault(user_id, deque())
       while (
