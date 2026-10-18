@@ -37,6 +37,11 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "Os jogos tamb\u00e9m est\u00e3o dispon\u00edveis em `/jogar_cassino`: Campo Minado "
     "a partir do n\u00edvel 2 e Raspadinha no n\u00edvel 3. Eles foram inclu\u00eddos no "
     "guia `/ajuda`.\n\n"
+    "**STATUS E COOLDOWNS**\n\n"
+    "`/status_apostador` agora mostra também os cooldowns de aposta em animais, "
+    "trabalho e roubo, além das recompensas globais e do cassino local.\n\n"
+    "O comando `/resetar_dados_jogadores` ganhou opções para liberar cada tipo "
+    "de cooldown separadamente ou todos de uma vez.\n\n"
     "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
@@ -3847,7 +3852,29 @@ def claim_reward(user_id: int, reward_type: str) -> tuple[bool, int, int]:
 
 
 def reset_player_data(reset_type: str) -> tuple[int, int]:
-    if reset_type not in {"balances", "reward_cooldowns"}:
+    reset_statements = {
+        "reward_cooldowns": (
+            "UPDATE economy_accounts SET daily_claim_at=NULL, weekly_claim_at=NULL, monthly_claim_at=NULL WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL OR monthly_claim_at IS NOT NULL",
+            "UPDATE guild_casino_accounts SET daily_claim_at=NULL, weekly_claim_at=NULL WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL",
+        ),
+        "animal_cooldowns": (
+            "UPDATE economy_accounts SET animal_bet_at=NULL WHERE animal_bet_at IS NOT NULL",
+            None,
+        ),
+        "work_cooldowns": (
+            "UPDATE economy_accounts SET work_used_seconds=0, work_started_at=NULL WHERE work_used_seconds != 0 OR work_started_at IS NOT NULL",
+            None,
+        ),
+        "robbery_cooldowns": (
+            "UPDATE economy_accounts SET robbery_attempts=?, robbery_recover_at=NULL WHERE robbery_attempts != ? OR robbery_recover_at IS NOT NULL",
+            None,
+        ),
+        "all_cooldowns": (
+            "UPDATE economy_accounts SET daily_claim_at=NULL, weekly_claim_at=NULL, monthly_claim_at=NULL, animal_bet_at=NULL, work_used_seconds=0, work_started_at=NULL, robbery_attempts=?, robbery_recover_at=NULL WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL OR monthly_claim_at IS NOT NULL OR animal_bet_at IS NOT NULL OR work_used_seconds != 0 OR work_started_at IS NOT NULL OR robbery_attempts != ? OR robbery_recover_at IS NOT NULL",
+            "UPDATE guild_casino_accounts SET daily_claim_at=NULL, weekly_claim_at=NULL WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL",
+        ),
+    }
+    if reset_type not in {"balances", *reset_statements}:
         raise ValueError(f"Tipo de reset inválido: {reset_type}")
 
     with closing(
@@ -3871,25 +3898,27 @@ def reset_player_data(reset_type: str) -> tuple[int, int]:
             ).rowcount
             return global_rows, local_rows
 
-        global_rows = connection.execute(
-            """
-            UPDATE economy_accounts
-            SET daily_claim_at = NULL,
-                weekly_claim_at = NULL,
-                monthly_claim_at = NULL
-            WHERE daily_claim_at IS NOT NULL
-               OR weekly_claim_at IS NOT NULL
-               OR monthly_claim_at IS NOT NULL
-            """
-        ).rowcount
-        local_rows = connection.execute(
-            """
-            UPDATE guild_casino_accounts
-            SET daily_claim_at = NULL, weekly_claim_at = NULL
-            WHERE daily_claim_at IS NOT NULL OR weekly_claim_at IS NOT NULL
-            """
-        ).rowcount
+        global_sql, local_sql = reset_statements[reset_type]
+        parameters = (
+            (ROBBERY_MAX_ATTEMPTS, ROBBERY_MAX_ATTEMPTS)
+            if reset_type in {"robbery_cooldowns", "all_cooldowns"}
+            else ()
+        )
+        global_rows = connection.execute(global_sql, parameters).rowcount
+        local_rows = connection.execute(local_sql).rowcount if local_sql else 0
         return global_rows, local_rows
+
+
+def get_player_cooldown_status(user_id: int) -> tuple:
+    with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
+        return connection.execute(
+            """
+            SELECT animal_bet_at, work_used_seconds, work_started_at,
+                   robbery_attempts, robbery_recover_at
+            FROM economy_accounts WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone() or (None, 0, None, ROBBERY_MAX_ATTEMPTS, None)
 
 
 def format_remaining(seconds: int) -> str:
@@ -6355,12 +6384,22 @@ class PlayerDataResetView(BlacklistView):
                 "de cassinos locais. O saldo da casa principal, os caixas "
                 "dos cassinos e o histórico estatístico foram preservados."
             )
-        else:
+        elif self.reset_type == "all_cooldowns":
+            message = (
+                "✅ Todos os cooldowns foram liberados para **"
+                f"{global_rows}** contas globais e **{local_rows}** contas "
+                "de cassinos locais."
+            )
+        elif self.reset_type == "reward_cooldowns":
             message = (
                 "✅ Cooldowns das recompensas foram liberados para todos: "
                 f"**{global_rows}** contas globais e **{local_rows}** contas "
-                "de cassinos locais. Os cooldowns de apostas em animais e "
-                "todo o histórico foram preservados."
+                "de cassinos locais."
+            )
+        else:
+            message = (
+                f"✅ Reset de `{self.reset_type}` concluído em "
+                f"**{global_rows}** contas globais."
             )
         button.disabled = True
         self.stop()
@@ -6389,7 +6428,7 @@ class PlayerDataResetView(BlacklistView):
 
 @bot.tree.command(
     name="resetar_dados_jogadores",
-    description="Reseta saldos ou cooldowns de recompensas dos jogadores.",
+    description="Reseta saldos e diferentes cooldowns dos jogadores.",
 )
 @app_commands.check(is_bot_owner)
 @app_commands.choices(
@@ -6399,6 +6438,10 @@ class PlayerDataResetView(BlacklistView):
             name="Liberar cooldowns das recompensas",
             value="reward_cooldowns",
         ),
+        app_commands.Choice(name="Liberar cooldown de apostas em animais", value="animal_cooldowns"),
+        app_commands.Choice(name="Liberar limite de trabalho (8h)", value="work_cooldowns"),
+        app_commands.Choice(name="Restaurar tentativas de roubo", value="robbery_cooldowns"),
+        app_commands.Choice(name="Liberar todos os cooldowns", value="all_cooldowns"),
     ]
 )
 async def resetar_dados_jogadores(
@@ -6411,12 +6454,18 @@ async def resetar_dados_jogadores(
             "em todos os cassinos. O saldo da casa principal, os caixas dos "
             "cassinos e o histórico estatístico não serão alterados."
         )
-    else:
+    elif tipo.value == "reward_cooldowns":
         description = (
             "Isso liberará os cooldowns de daily, weekly e monthly globais, "
-            "além de daily e weekly dos cassinos locais, para todos os "
-            "jogadores. Cooldowns de apostas em animais não serão alterados."
+            "além de daily e weekly dos cassinos locais, para todos os jogadores."
         )
+    else:
+        description = {
+            "animal_cooldowns": "Isso liberará o cooldown de apostas em animais de todos os jogadores.",
+            "work_cooldowns": "Isso restaurará o limite de trabalho de 8 horas de todos os jogadores.",
+            "robbery_cooldowns": "Isso restaurará as tentativas de roubo de todos os jogadores.",
+            "all_cooldowns": "Isso liberará recompensas, apostas em animais, trabalho e tentativas de roubo para todos os jogadores.",
+        }[tipo.value]
     embed = discord.Embed(
         title="Confirmar reset de dados dos jogadores",
         description=description,
@@ -6500,6 +6549,64 @@ async def status_apostador(interaction: discord.Interaction) -> None:
             f"Daily: **{reward_cooldown_status(daily_claim_at, REWARD_SETTINGS['daily'][1])}**\n"
             f"Weekly: **{reward_cooldown_status(weekly_claim_at, REWARD_SETTINGS['weekly'][1])}**\n"
             f"Monthly: **{reward_cooldown_status(monthly_claim_at, REWARD_SETTINGS['monthly'][1])}**"
+        ),
+        inline=False,
+    )
+    (
+        animal_bet_at,
+        work_used_seconds,
+        work_started_at,
+        robbery_attempts,
+        robbery_recover_at,
+    ) = get_player_cooldown_status(interaction.user.id)
+    now = int(time.time())
+    animal_status = reward_cooldown_status(
+        animal_bet_at,
+        ANIMAL_BET_COOLDOWN,
+        now,
+    )
+    if (
+        work_started_at is None
+        or now - work_started_at >= WORK_RECOVERY_SECONDS
+    ):
+        work_status = "Disponível agora"
+    else:
+        work_remaining = max(0, WORK_LIMIT_SECONDS - work_used_seconds)
+        if work_remaining == 0:
+            work_status = (
+                "recupera "
+                f"em {format_remaining(work_started_at + WORK_RECOVERY_SECONDS - now)}"
+            )
+        else:
+            work_status = (
+                f"{format_remaining(work_remaining)} de trabalho disponíveis; "
+                "renova em "
+                f"{format_remaining(work_started_at + WORK_RECOVERY_SECONDS - now)}"
+            )
+    robbery_status = (
+        f"{robbery_attempts}/{ROBBERY_MAX_ATTEMPTS} tentativas disponíveis"
+    )
+    if (
+        robbery_attempts == 0
+        and robbery_recover_at is not None
+        and robbery_recover_at <= now
+    ):
+        robbery_status = f"{ROBBERY_MAX_ATTEMPTS}/{ROBBERY_MAX_ATTEMPTS} tentativas disponíveis"
+    if (
+        robbery_attempts == 0
+        and robbery_recover_at is not None
+        and robbery_recover_at > now
+    ):
+        robbery_status += (
+            f"; recupera em "
+            f"{format_remaining(robbery_recover_at - now)}"
+        )
+    embed.add_field(
+        name="Outros cooldowns",
+        value=(
+            f"Aposta em animais: **{animal_status}**\n"
+            f"Trabalho: **{work_status}**\n"
+            f"Roubo: **{robbery_status}**"
         ),
         inline=False,
     )

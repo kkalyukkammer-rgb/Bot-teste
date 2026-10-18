@@ -26,8 +26,9 @@ em categorias distintas, as apostas de jogadores e a operação de NPCs.
 
 `/status_apostador` mostra em uma resposta privada o próprio saldo,
 ganhos/perdas acumulados, volume e quantidade de apostas, prestígio,
-upgrades e disponibilidade das recompensas. Quando usado em um servidor
-com cassino próprio, também inclui saldo, apostas e recompensas locais.
+upgrades e disponibilidade das recompensas globais, dos cooldowns de animais,
+trabalho e roubo. Quando usado em um servidor com cassino próprio, também
+inclui saldo, apostas e recompensas locais.
 
 As apostas vencedoras de NPCs nos cassinos de jogadores são dimensionadas
 para deixar pelo menos 1.000 moedas líquidas no caixa local, após a taxa
@@ -78,23 +79,22 @@ de prestígio podem elevar o retorno real acima desse valor. Como os prêmios
 são inteiros, apostas muito pequenas podem se afastar mais do alvo por causa
 do arredondamento.
 
-O owner do bot pode usar `/resetar_dados_jogadores` para escolher entre
-zerar os saldos globais e locais dos jogadores ou liberar os cooldowns de
-recompensas globais e locais. O comando pede confirmação; os caixas dos
-cassinos e o histórico estatístico são preservados ao zerar saldos.
+O owner do bot pode usar `/resetar_dados_jogadores` para zerar saldos ou
+liberar cooldowns de recompensas, apostas em animais, trabalho, roubo ou todos
+de uma vez. O comando pede confirmação; os caixas dos cassinos e o histórico
+estatístico são preservados ao zerar saldos.
 A recompensa mensal global varia de 1.000 a 20.000 moedas.
 
 Qualquer apostador pode usar `/feedback` para enviar uma sugestão ou opinião
 diretamente por mensagem privada ao owner do bot. O bot confirma em uma
 resposta privada se a entrega foi concluída.
 
-Ao iniciar, o bot publica no canal `1560451788254216343` do servidor
-`1467549007932030998` o texto de atualização definido em
-`UPDATE_ANNOUNCEMENT_MESSAGE` no código e menciona o cargo
-`1559362476921987072`. O texto é enviado automaticamente quando muda e seu
-envio fica registrado no banco, sem consultar commits Git. Ao preparar uma
-atualização, ajuste esse texto para resumir novidades e também correções em
-comandos e mecânicas. Esta versão anuncia trabalho e roubo, os jogos
+O owner publica manualmente as atualizações usando `/anunciar_update`. O bot
+envia o texto de `UPDATE_ANNOUNCEMENT_MESSAGE` ao canal
+`1560451788254216343` do servidor `1467549007932030998` e menciona o cargo
+`1559362476921987072`. Ao preparar uma atualização, ajuste esse texto para
+resumir novidades e também correções em comandos e mecânicas. Esta versão
+anuncia trabalho e roubo, os jogos
 `/maior_menor` e `/jokenpo`, as imagens dos resultados, a renomeação para
 `/jogo_do_bixo` e seus 16 animais, a redução dos cooldowns de trabalho e roubo
 para 8 horas, o aumento dos salários e ganhos de roubo, o balanceamento de
