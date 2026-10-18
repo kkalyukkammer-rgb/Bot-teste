@@ -480,18 +480,17 @@ def initialize_economy() -> None:
             """
         )
         reservation_columns = {
-            column[1]
+            column[1].casefold()
             for column in connection.execute(
                 "PRAGMA table_info(house_bet_reservations)"
             )
         }
-        if "house_BOT_OWNER_ID" not in reservation_columns:
+        if "house_bot_owner_id" not in reservation_columns:
             connection.execute(
                 "ALTER TABLE house_bet_reservations "
                 "ADD COLUMN house_BOT_OWNER_ID INTEGER NOT NULL "
                 f"DEFAULT {BOT_OWNER_ID}"
             )
-            reservation_columns.add("house_BOT_OWNER_ID")
         if "exposure" not in reservation_columns:
             connection.execute(
                 "ALTER TABLE house_bet_reservations "
