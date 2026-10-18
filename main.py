@@ -41,9 +41,11 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/jogar_cassino` permite escolher a casa principal (saldo global) ou o cassino deste servidor (saldo local).\n"
     "`/moeda`: retorno base x2. `/roleta`: vermelho/preto aprox. x2,06; zero x37.\n"
     "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
+    "Em blackjack e jokenpo de duelo, quem nao fizer a jogada antes do tempo perde a aposta; se nenhum participante do duelo jogar, ambos perdem.\n"
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "O autoblock pode ser configurado pelo dono do bot com `/configurar_autoblock`, definindo janela, quantidade de comandos, duracao da punicao e limite de punicoes. Ao atingir o limite, o usuario fica bloqueado por 24 horas.\n\n"
+    "A verificacao anti-macro pode pedir um desafio aleatorio ao atingir o limite anti-spam, com intervalo aleatorio de 3 a 10 minutos entre desafios para cada usuario.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
     "O servidor principal e o servidor dos anuncios. No servidor de destino, o dono do bot pode usar `/ativar_servidor` e informar o ID do proprio servidor.\n"
     "Tambem e possivel liberar pelo servidor principal com `/autorizar_servidor` ou revogar com `/revogar_servidor`."
@@ -818,6 +820,23 @@ class CommandSpamGuard:
     self._blocked_until.pop(user_id, None)
     return had_spam_state
 
+  def clear_activity(self, user_id: int) -> None:
+    self._timestamps.pop(user_id, None)
+
+  def would_trigger(self, user_id: int, now: float | None = None) -> bool:
+    current = time.monotonic() if now is None else now
+    if self._blocked_until.get(user_id, 0.0) > current:
+      return False
+    timestamps = self._timestamps.get(user_id)
+    if timestamps is None:
+      return self.command_limit <= 1
+    while timestamps and current - timestamps[0] >= self.window_seconds:
+      timestamps.popleft()
+    if not timestamps:
+      self._timestamps.pop(user_id, None)
+      return self.command_limit <= 1
+    return len(timestamps) + 1 >= self.command_limit
+
   def check(self, user_id: int, now: float | None = None) -> int | None:
     current = time.monotonic() if now is None else now
     self.last_punishment_applied = False
@@ -881,6 +900,77 @@ class CommandSpamGuard:
 
 
 COMMAND_SPAM_GUARD = CommandSpamGuard()
+MACRO_CHALLENGE_COOLDOWN_MIN_SECONDS = 3 * 60
+MACRO_CHALLENGE_COOLDOWN_MAX_SECONDS = 10 * 60
+MACRO_CHECK_PENDING: dict[int, tuple[int, str]] = {}
+MACRO_CHECK_NEXT_AT: dict[int, float] = {}
+
+
+def create_macro_captcha() -> tuple[int, str, list[int]]:
+  left = random.randint(2, 20)
+  right = random.randint(2, 20)
+  answer = left + right
+  choices = {answer}
+  while len(choices) < 4:
+    choices.add(answer + random.randint(-8, 8))
+  options = list(choices)
+  random.shuffle(options)
+  return answer, f"Verificacao anti-macro: quanto e **{left} + {right}**?", options
+
+
+class MacroCaptchaView(discord.ui.View):
+  def __init__(self, user_id: int, answer: int, options: list[int]) -> None:
+    super().__init__(timeout=180)
+    self.user_id = user_id
+    for option in options:
+      button = discord.ui.Button(
+          label=str(option),
+          style=discord.ButtonStyle.primary,
+          custom_id=f"macro_captcha:{user_id}:{option}",
+      )
+
+      async def choose(interaction: discord.Interaction, value: int = option) -> None:
+        if value == answer:
+          MACRO_CHECK_PENDING.pop(user_id, None)
+          COMMAND_SPAM_GUARD.clear_activity(user_id)
+          await interaction.response.edit_message(
+              content="Verificacao concluida. Seus comandos foram liberados.",
+              view=None,
+          )
+          return
+
+        MACRO_CHECK_PENDING.pop(user_id, None)
+        COMMAND_SPAM_GUARD.clear_activity(user_id)
+        penalty = COMMAND_SPAM_GUARD.punishment_seconds
+        COMMAND_SPAM_GUARD._blocked_until[user_id] = time.monotonic() + penalty
+        await interaction.response.edit_message(
+            content=f"Resposta incorreta. Comandos bloqueados por {penalty} segundos.",
+            view=None,
+        )
+        await notify_owner_of_command_punishment(interaction, penalty)
+
+      button.callback = choose
+      self.add_item(button)
+
+  async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    if interaction.user.id != self.user_id:
+      await interaction.response.send_message(
+          "Este desafio pertence a outro usuario.", ephemeral=True
+      )
+      return False
+    return True
+
+
+def get_macro_captcha_view(user_id: int) -> tuple[str, MacroCaptchaView]:
+  challenge = MACRO_CHECK_PENDING.get(user_id)
+  if challenge is None:
+    answer, prompt, options = create_macro_captcha()
+    MACRO_CHECK_PENDING[user_id] = (answer, prompt)
+  else:
+    answer, prompt = challenge
+    options = list({answer, answer + 1, answer - 1, answer + 2})
+    random.shuffle(options)
+  return prompt, MacroCaptchaView(user_id, answer, options)
 
 
 async def notify_owner_of_command_punishment(
@@ -956,7 +1046,35 @@ class BlacklistCommandTree(app_commands.CommandTree):
     if await verificar_usuario_bloqueado(interaction):
       return False
 
-    retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id)
+    if interaction.user.id in MACRO_CHECK_PENDING:
+      prompt, captcha_view = get_macro_captcha_view(interaction.user.id)
+      await interaction.response.send_message(
+          f"{prompt}\nResolva o desafio para continuar usando comandos.",
+          view=captcha_view,
+          ephemeral=True,
+      )
+      return False
+    current_time = time.monotonic()
+    next_challenge_at = MACRO_CHECK_NEXT_AT.get(interaction.user.id, 0.0)
+    challenge_ready = current_time >= next_challenge_at
+    if challenge_ready and COMMAND_SPAM_GUARD.would_trigger(
+        interaction.user.id, now=current_time
+    ):
+      COMMAND_SPAM_GUARD.clear_activity(interaction.user.id)
+      cooldown_seconds = random.randint(
+          MACRO_CHALLENGE_COOLDOWN_MIN_SECONDS,
+          MACRO_CHALLENGE_COOLDOWN_MAX_SECONDS,
+      )
+      MACRO_CHECK_NEXT_AT[interaction.user.id] = current_time + cooldown_seconds
+      prompt, captcha_view = get_macro_captcha_view(interaction.user.id)
+      await interaction.response.send_message(
+          f"{prompt}\nResolva o desafio para continuar usando comandos.",
+          view=captcha_view,
+          ephemeral=True,
+      )
+      return False
+
+    retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id, now=current_time)
     if retry_after is not None:
       if COMMAND_SPAM_GUARD.last_punishment_applied:
         await notify_owner_of_command_punishment(interaction, retry_after)
@@ -3180,6 +3298,8 @@ def settle_duel_bets(
     opponent_id: int,
     amount: int,
     winner_id: int | None,
+    *,
+    both_forfeit: bool = False,
 ) -> tuple[int, int, int]:
     if winner_id not in (None, challenger_id, opponent_id):
         raise ValueError("O vencedor precisa ser um dos jogadores do desafio.")
@@ -3191,7 +3311,18 @@ def settle_duel_bets(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
             (house_BOT_OWNER_ID,),
         )
-        if winner_id is None:
+        if winner_id is None and both_forfeit:
+            winner_winnings = 0
+            house_change = amount * 2
+            connection.execute(
+                """
+                UPDATE economy_accounts
+                SET balance = balance + ?, total_earned = total_earned + ?
+                WHERE user_id = ?
+                """,
+                (house_change, house_change, house_BOT_OWNER_ID),
+            )
+        elif winner_id is None:
             winner_winnings = 0
             house_change = 0
             connection.executemany(
@@ -4614,11 +4745,11 @@ class BlackjackView(BlacklistView):
                 self.user.id,
                 self.house_BOT_OWNER_ID,
                 self.bet,
-                self.bet,
+                0,
             )
-            self.payout = self.bet
-            self.net_change = 0
-            self.result = "Partida encerrada por inatividade. Sua aposta foi devolvida."
+            self.payout = 0
+            self.net_change = -self.bet
+            self.result = "Tempo esgotado. Voce nao concluiu sua jogada e perdeu a aposta."
             for item in self.children:
                 if isinstance(item, discord.ui.Button):
                     item.disabled = True
@@ -5939,7 +6070,13 @@ class DuelView(BlacklistView):
             self.game,
         )
 
-    async def _finish_round(self, winner_id: int | None, result: str) -> None:
+    async def _finish_round(
+        self,
+        winner_id: int | None,
+        result: str,
+        *,
+        both_forfeit: bool = False,
+    ) -> None:
         self.finished = True
         self.result = result
         (
@@ -5951,6 +6088,7 @@ class DuelView(BlacklistView):
             self.opponent.id,
             self.bet,
             winner_id,
+            both_forfeit=both_forfeit,
         )
         if winner_id is not None:
             base_house_fee = (
@@ -6250,10 +6388,21 @@ class DuelView(BlacklistView):
             if self.finished:
                 return
             if self.accepted:
-                await self._finish_round(
-                    None,
-                    "⏰ Tempo esgotado. As duas apostas foram devolvidas.",
-                )
+                if len(self.choices) == 1:
+                    winner_id = next(iter(self.choices))
+                    winner = self.challenger if winner_id == self.challenger.id else self.opponent
+                    absent_player = self.opponent if winner_id == self.challenger.id else self.challenger
+                    await self._finish_round(
+                        winner_id,
+                        f"Tempo esgotado: {absent_player.mention} nao escolheu e perdeu a aposta. "
+                        f"{winner.mention} vence por W.O.!",
+                    )
+                else:
+                    await self._finish_round(
+                        None,
+                        "Tempo esgotado: nenhum jogador escolheu. Ambos perderam as apostas.",
+                        both_forfeit=True,
+                    )
             else:
                 self.finished = True
                 self.result = "⏰ O desafio expirou sem ser aceito."
