@@ -62,9 +62,13 @@ adicionados `/maior_menor` e `/jokenpo`, que também podem ser jogados com
 moedas locais por `/jogar_cassino` quando o nível do cassino liberar cada
 jogo. O comando antigo `/corrida` foi renomeado para `/jogo_do_bixo`, com 16
 animais disponíveis para escolha. As apostas exibem imagens ilustrativas
-geradas para cada resultado; o caça-níquel mantém sua animação em GIF. No
-maior/menor, tirar 7 devolve a aposta; no jokenpô, um empate também devolve
-a aposta.
+geradas para cada resultado; dados, roleta e caça-níquel têm animações em GIF.
+No blackjack, as cartas 10, J, Q e K têm metade do peso das demais: juntas,
+passam de 30,8% para aproximadamente 18,2% das cartas sorteadas. Cada vitória
+consecutiva no blackjack aumenta em 10% o bônus sobre o lucro, até +200%; uma
+derrota zera a sequência e um empate a mantém. A sequência é salva entre
+reinicializações. No maior/menor, tirar 7 devolve a aposta; no jokenpô, um
+empate também devolve a aposta.
 
 Os pagamentos de moeda, dados, roleta, jogo do bicho, caça-níquel, maior/menor e
 jokenpô foram ajustados para aproximadamente 95% de retorno esperado antes

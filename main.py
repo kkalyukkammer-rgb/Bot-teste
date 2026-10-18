@@ -27,26 +27,19 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "**Jogos e balanceamento:** retorno esperado dos jogos de chance "
-    "recalibrado para cerca de 95% antes dos bônus de prestígio; adicionados "
-    "/maior_menor e /jokenpo, com empate devolvendo a aposta. /corrida foi "
-    "renomeado para /jogo_do_bixo e ampliado para 16 animais. Resultados de "
-    "apostas agora exibem artes; o caça-níquel mantém seu GIF. Botões permitem "
-    "repetir a aposta na mesma mensagem.\n\n"
-    "**Economia:** /workshift e /roubar recuperam o limite após 8 horas. "
-    "Salários por trabalho aumentaram 50%; os ganhos por roubo subiram "
-    "para "
-    "2.500–15.000 moedas. O roubo mantém até 5 tentativas e falha esgota "
-    "todas.\n\n"
-    "**Cassinos e correções:** jogos novos integrados ao cassino local por "
-    "nível; upgrades listam os jogos liberados. Corrigidos resultados e "
-    "pagamentos dos jogos globais, apostas repetidas e cassino local. "
-    "/ajuda foi reorganizado por funcionalidade."
+    "*MINI UPDATE*\n\n"
+    "**BALANCEAMENTOS E QOL** \n\n"
+    "Melhorias nas recompensas de alguns jogos e ajustes no sistema de economia.\n\n"
+    "adição de bonus de winstreack no jogo blackjack, podendo chegar até +200% (porecento) de bônus, ganhando 10% por vitoria\n\n"
+    "balanceamento no jogo blackjack, agora foram reduzida as chances de vir, por terem mesmo valor acabavam vindo com muita frequencia e em excesso.\n\n"
+    "**MELHORIAS NA INTERFACE DO JOGO** \n\n"
+    "Adição de gifs nos jogos de roleta e dados.\n\n"
+    
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
-MAIN_HOUSE_UPGRADE_MAX_LEVEL = 10
+MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
-MAIN_HOUSE_UPGRADE_NPC_BONUS = 10
+MAIN_HOUSE_UPGRADE_NPC_BONUS = 20
 PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 BACKUP_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "backup")
 DEFAULT_ECONOMY_DB_PATH = os.path.join(BACKUP_DIRECTORY, "economy.sqlite3")
@@ -80,7 +73,7 @@ SLOT_PAIR_MULTIPLIERS = {
 }
 SLOT_PROFIT_FACTOR_NUMERATOR = 11_400
 SLOT_PROFIT_FACTOR_DENOMINATOR = 10_000
-BET_RETURN_PERCENT = 95
+BET_RETURN_PERCENT = 100
 BETTING_ANIMALS = (
     "Leão 🦁",
     "Tigre 🐯",
@@ -107,14 +100,18 @@ ANIMAL_BET_COOLDOWN = 24 * 60 * 60
 ROULETTE_RED_NUMBERS = frozenset(
     {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 )
-DEFAULT_CASINO_CREATION_FEE = 1_000
-DEFAULT_CASINO_TAX_PERCENT = 10
-DEFAULT_MAIN_HOUSE_NPCS = 10
+BLACKJACK_CARDS = ("A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K")
+BLACKJACK_CARD_WEIGHTS = (2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1)
+BLACKJACK_STREAK_BONUS_PER_WIN_PERCENT = 10
+BLACKJACK_STREAK_BONUS_MAX_PERCENT = 200
+DEFAULT_CASINO_CREATION_FEE = 750_000
+DEFAULT_CASINO_TAX_PERCENT = 15
+DEFAULT_MAIN_HOUSE_NPCS = 50
 MAIN_HOUSE_NPC_BET_MIN = 5_000
 MAIN_HOUSE_NPC_BET_MAX = 20_000
-CASINO_STARTING_NPCS = 3
+CASINO_STARTING_NPCS = 10
 CASINO_MAX_NPCS = 100
-CASINO_NPC_HIRE_COST = 1_000
+CASINO_NPC_HIRE_COST = 2_000
 CASINO_NPC_MIN_NET_EARNINGS = 1_000
 CASINO_NPC_BET_MAX_MULTIPLIER = 4
 NPC_ONLINE_INTERVAL_MIN_SECONDS = 15
@@ -138,8 +135,8 @@ CASINO_MINIMUM_TAX_PERCENT = 1
 CASINO_STARTING_TREASURY = 10_000
 CASINO_GAME_UNLOCKS = {
     "moeda": 0,
-    "dados": 1,
-    "roleta": 2,
+    "dados": 3,
+    "roleta": 1,
     "maior_menor": 2,
     "cacaniquel": 3,
     "jokenpo": 3,
@@ -177,8 +174,8 @@ CASINO_ROLE_REFRESH_COMMANDS = CASINO_PARTICIPANT_COMMANDS | frozenset(
 PRESTIGE_STARTING_REQUIREMENT = 1_000_000
 PRESTIGE_MAX_LEVEL = 28
 PRESTIGE_MAX_UPGRADE_LEVEL = 10
-PLAYER_BASE_BET_LIMIT = 1_000_000
-PLAYER_BET_LIMIT_PER_UPGRADE = 100_000
+PLAYER_BASE_BET_LIMIT = 100_000_000
+PLAYER_BET_LIMIT_PER_UPGRADE = 150_000
 PLAYER_BET_PARAMETER_MAX = (
     PLAYER_BASE_BET_LIMIT
     + PRESTIGE_MAX_UPGRADE_LEVEL * PLAYER_BET_LIMIT_PER_UPGRADE
@@ -208,8 +205,8 @@ JOBS = {
     "desempregado": ("Bico", 0, 3_000),
     "entregador": ("Entregador", 5_000, 7_500),
     "seguranca": ("Segurança", 20_000, 12_000),
-    "programador": ("Programador", 75_000, 18_000),
-    "influenciador": ("Influenciador", 200_000, 27_000),
+    "programador": ("Programador", 75_000, 17_500),
+    "influenciador": ("Influenciador", 200_000, 30_000),
 }
 
 
@@ -452,6 +449,14 @@ def initialize_economy() -> None:
                 amount INTEGER NOT NULL,
                 exposure INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS blackjack_win_streaks (
+                user_id INTEGER PRIMARY KEY,
+                win_streak INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -1089,6 +1094,25 @@ def apply_positive_profit_bonus(profit: int, bonus_levels: int) -> int:
     if profit <= 0 or bonus_levels <= 0:
         return profit
     return profit + (profit * bonus_levels * 5 + 99) // 100
+
+
+def blackjack_streak_bonus_percent(win_streak: int) -> int:
+    return min(
+        win_streak * BLACKJACK_STREAK_BONUS_PER_WIN_PERCENT,
+        BLACKJACK_STREAK_BONUS_MAX_PERCENT,
+    )
+
+
+def apply_blackjack_streak_bonus(
+    bet: int,
+    payout: int,
+    previous_win_streak: int,
+) -> int:
+    if payout <= bet:
+        return payout
+    bonus_percent = blackjack_streak_bonus_percent(previous_win_streak + 1)
+    profit = payout - bet
+    return payout + (profit * bonus_percent + 99) // 100
 
 
 def adjust_player_bet_payout(user_id: int, bet: int, payout: int) -> int:
@@ -1832,7 +1856,19 @@ async def repeat_bet(
         raise ValueError(f"Jogo de repetição desconhecido: {game}")
 
     payout = adjust_player_bet_payout(interaction.user.id, bet, payout)
-    if game == "cacaniquel":
+    if game == "dados":
+        animation = await asyncio.to_thread(render_dice_gif, roll)
+        file = discord.File(animation, filename="dados.gif")
+        image_url = "attachment://dados.gif"
+    elif game == "roleta":
+        animation = await asyncio.to_thread(
+            render_roulette_gif,
+            number,
+            result_color,
+        )
+        file = discord.File(animation, filename="roleta.gif")
+        image_url = "attachment://roleta.gif"
+    elif game == "cacaniquel":
         multiplier = payout / bet
         result = (
             f"Resultado: **{' | '.join(reels)}** — {combination} "
@@ -2293,9 +2329,9 @@ def reserve_blackjack_bet(
     user_id: int,
     house_owner_id: int,
     bet: int,
-) -> tuple[bool, int, str]:
+) -> tuple[bool, int, str, int]:
     if user_id == house_owner_id:
-        return False, get_balance(user_id), "owner"
+        return False, get_balance(user_id), "owner", 0
     if bet <= 0:
         raise ValueError("A aposta precisa ser positiva.")
 
@@ -2320,7 +2356,18 @@ def reserve_blackjack_bet(
             """,
             (user_id,),
         ).fetchone()[0]
-        exposure = apply_positive_profit_bonus(bet, bonus_levels)
+        streak_row = connection.execute(
+            "SELECT win_streak FROM blackjack_win_streaks WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        win_streak = streak_row[0] if streak_row is not None else 0
+        base_payout = bet + apply_positive_profit_bonus(bet, bonus_levels)
+        max_payout = apply_blackjack_streak_bonus(
+            bet,
+            base_payout,
+            win_streak,
+        )
+        exposure = max_payout - bet
         reserved = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
@@ -2329,9 +2376,9 @@ def reserve_blackjack_bet(
             (house_owner_id,),
         ).fetchone()[0]
         if player_balance < bet:
-            return False, player_balance, "player"
+            return False, player_balance, "player", 0
         if house_balance - reserved < exposure:
-            return False, player_balance, "house"
+            return False, player_balance, "house", 0
 
         connection.execute(
             """
@@ -2350,7 +2397,7 @@ def reserve_blackjack_bet(
             (user_id, house_owner_id, bet, exposure, int(time.time())),
         )
         record_bet_activity(connection, user_id, bet)
-        return True, player_balance - bet, str(reservation.lastrowid)
+        return True, player_balance - bet, str(reservation.lastrowid), win_streak
 
 
 def settle_blackjack_bet(
@@ -2416,6 +2463,26 @@ def settle_blackjack_bet(
             "DELETE FROM house_bet_reservations WHERE reservation_id = ?",
             (int(reservation_id),),
         )
+        if payout > bet:
+            connection.execute(
+                """
+                INSERT INTO blackjack_win_streaks (user_id, win_streak)
+                VALUES (?, 1)
+                ON CONFLICT(user_id)
+                DO UPDATE SET win_streak = win_streak + 1
+                """,
+                (user_id,),
+            )
+        elif payout < bet:
+            connection.execute(
+                """
+                INSERT INTO blackjack_win_streaks (user_id, win_streak)
+                VALUES (?, 0)
+                ON CONFLICT(user_id)
+                DO UPDATE SET win_streak = 0
+                """,
+                (user_id,),
+            )
         increment_house_stat(connection, "main_house_games")
         return connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
@@ -3591,6 +3658,14 @@ def hand_total(cards: list[str]) -> int:
     return total
 
 
+def draw_blackjack_card() -> str:
+    return random.choices(
+        BLACKJACK_CARDS,
+        weights=BLACKJACK_CARD_WEIGHTS,
+        k=1,
+    )[0]
+
+
 class BlackjackView(discord.ui.View):
     def __init__(
         self,
@@ -3601,6 +3676,7 @@ class BlackjackView(discord.ui.View):
         balance: int,
         house_owner_id: int,
         reservation_id: str,
+        win_streak: int,
     ) -> None:
         super().__init__(timeout=90)
         self.user = user
@@ -3610,8 +3686,11 @@ class BlackjackView(discord.ui.View):
         self.balance = balance
         self.house_owner_id = house_owner_id
         self.reservation_id = reservation_id
+        self.win_streak = win_streak
+        self.streak_bonus_percent = 0
         self.message: discord.InteractionMessage | None = None
         self.finished = False
+        self.timed_out = False
         self.result = "Escolha uma ação nos botões abaixo."
         self.payout = 0
         self.net_change = 0
@@ -3681,11 +3760,46 @@ class BlackjackView(discord.ui.View):
                 value=f"{net_sign}{format_coins(self.net_change)} moedas",
                 inline=True,
             )
+            if self.net_change > 0:
+                embed.add_field(
+                    name="🔥 Bônus da sequência",
+                    value=(
+                        f"+{self.streak_bonus_percent}% sobre o lucro "
+                        f"({self.win_streak} vitória(s) seguida(s))"
+                    ),
+                    inline=False,
+                )
+            elif self.net_change == 0:
+                embed.add_field(
+                    name="🔥 Sequência",
+                    value=(
+                        f"{self.win_streak} vitória(s); sequência mantida "
+                        "após inatividade."
+                        if self.timed_out
+                        else f"{self.win_streak} vitória(s); empate mantém a sequência."
+                    ),
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="🔥 Sequência",
+                    value="Zerada após a derrota.",
+                    inline=False,
+                )
         else:
             embed.description = (
                 f"{self.result}\n\n"
                 "Use **Comprar carta** para pedir outra ou **Parar** "
                 "para encerrar sua mão. O dealer compra até chegar a 17."
+            )
+            next_bonus = blackjack_streak_bonus_percent(self.win_streak + 1)
+            embed.add_field(
+                name="🔥 Próximo bônus",
+                value=(
+                    f"+{next_bonus}% sobre o lucro se vencer "
+                    f"(sequência atual: {self.win_streak})"
+                ),
+                inline=False,
             )
         embed.set_footer(
             text=f"Saldo atual: {format_coins(self.balance)} moedas"
@@ -3699,11 +3813,7 @@ class BlackjackView(discord.ui.View):
             self.payout = 0
         else:
             while hand_total(self.dealer_cards) < 17:
-                self.dealer_cards.append(
-                    random.choice(
-                        ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-                    )
-                )
+                self.dealer_cards.append(draw_blackjack_card())
 
             dealer_total = hand_total(self.dealer_cards)
             if dealer_total > 21 or player_total > dealer_total:
@@ -3725,18 +3835,35 @@ class BlackjackView(discord.ui.View):
                     f"**{player_total}**. A aposta foi perdida."
                 )
 
-            self.payout = adjust_player_bet_payout(
-                self.user.id,
+        self.payout = adjust_player_bet_payout(
+            self.user.id,
+            self.bet,
+            self.payout,
+        )
+        if self.payout > self.bet:
+            self.streak_bonus_percent = blackjack_streak_bonus_percent(
+                self.win_streak + 1
+            )
+            self.payout = apply_blackjack_streak_bonus(
                 self.bet,
                 self.payout,
+                self.win_streak,
             )
-            self.balance = settle_blackjack_bet(
+            self.result += (
+                f"\n🔥 Bônus da sequência: "
+                f"+{self.streak_bonus_percent}% sobre o lucro."
+            )
+        self.balance = settle_blackjack_bet(
             self.reservation_id,
             self.user.id,
             self.house_owner_id,
             self.bet,
             self.payout,
         )
+        if self.payout > self.bet:
+            self.win_streak += 1
+        elif self.payout < self.bet:
+            self.win_streak = 0
         self.net_change = self.payout - self.bet
         self.finished = True
         for item in self.children:
@@ -3758,8 +3885,7 @@ class BlackjackView(discord.ui.View):
                 return
 
             if draw_card:
-                cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-                self.player_cards.append(random.choice(cards))
+                self.player_cards.append(draw_blackjack_card())
                 player_total = hand_total(self.player_cards)
                 if player_total > 21:
                     self._resolve()
@@ -3812,6 +3938,7 @@ class BlackjackView(discord.ui.View):
                 return
 
             self.finished = True
+            self.timed_out = True
             self.balance = settle_blackjack_bet(
                 self.reservation_id,
                 self.user.id,
@@ -4343,6 +4470,195 @@ def render_slot_gif(reels: list[str], multiplier: float) -> io.BytesIO:
         save_all=True,
         append_images=frames[1:],
         duration=[75] * (frame_count - 1) + [1200],
+        optimize=False,
+        disposal=2,
+    )
+    output.seek(0)
+    return output
+
+
+def render_dice_gif(result: int) -> io.BytesIO:
+    width, height = 560, 300
+    frame_count = 16
+    frames: list[Image.Image] = []
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 28)
+        result_font = ImageFont.truetype(font_path, 20)
+    except OSError:
+        title_font = ImageFont.load_default()
+        result_font = ImageFont.load_default()
+
+    pip_positions = {
+        1: ((0, 0),),
+        2: ((-1, -1), (1, 1)),
+        3: ((-1, -1), (0, 0), (1, 1)),
+        4: ((-1, -1), (-1, 1), (1, -1), (1, 1)),
+        5: ((-1, -1), (-1, 1), (0, 0), (1, -1), (1, 1)),
+        6: ((-1, -1), (-1, 0), (-1, 1), (1, -1), (1, 0), (1, 1)),
+    }
+    for frame_index in range(frame_count):
+        image = Image.new("RGB", (width, height), (18, 28, 49))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (20, 18, width - 20, height - 18),
+            radius=28,
+            fill=(31, 44, 70),
+            outline=(82, 196, 164),
+            width=4,
+        )
+        draw.text(
+            (width // 2, 48),
+            "DADOS",
+            font=title_font,
+            fill=(255, 225, 150),
+            anchor="mm",
+        )
+        rolled = result if frame_index == frame_count - 1 else random.randint(1, 6)
+        die_box = (width // 2 - 76, 76, width // 2 + 76, 228)
+        draw.rounded_rectangle(
+            die_box,
+            radius=24,
+            fill=(248, 246, 235),
+            outline=(255, 255, 255),
+            width=4,
+        )
+        for column, row in pip_positions[rolled]:
+            x = width // 2 + column * 42
+            y = 152 + row * 42
+            draw.ellipse(
+                (x - 9, y - 9, x + 9, y + 9),
+                fill=(37, 49, 73),
+            )
+        draw.text(
+            (width // 2, 260),
+            f"RESULTADO: {rolled}" if frame_index == frame_count - 1 else "ROLANDO...",
+            font=result_font,
+            fill=(230, 237, 249),
+            anchor="mm",
+        )
+        frames.append(image)
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[65] * (frame_count - 1) + [1100],
+        optimize=False,
+        disposal=2,
+    )
+    output.seek(0)
+    return output
+
+
+def render_roulette_gif(number: int, result_color: str) -> io.BytesIO:
+    width, height = 560, 320
+    frame_count = 20
+    frames: list[Image.Image] = []
+    font_path = r"C:\Windows\Fonts\arial.ttf"
+    try:
+        title_font = ImageFont.truetype(font_path, 26)
+        result_font = ImageFont.truetype(font_path, 21)
+        center_font = ImageFont.truetype(font_path, 27)
+    except OSError:
+        title_font = ImageFont.load_default()
+        result_font = ImageFont.load_default()
+        center_font = ImageFont.load_default()
+
+    segment_angle = 360 / 37
+    target_rotation = -90 - number * segment_angle
+    for frame_index in range(frame_count):
+        image = Image.new("RGB", (width, height), (18, 28, 49))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (20, 16, width - 20, height - 16),
+            radius=28,
+            fill=(31, 44, 70),
+            outline=(219, 173, 86),
+            width=4,
+        )
+        draw.text(
+            (width // 2, 42),
+            "ROLETA EUROPEIA",
+            font=title_font,
+            fill=(255, 225, 150),
+            anchor="mm",
+        )
+        center_x, center_y = width // 2, 178
+        radius = 108
+        remaining_turns = 5 * (1 - frame_index / (frame_count - 1)) ** 2
+        rotation = target_rotation - remaining_turns * 360
+        for index in range(37):
+            center_angle = rotation + index * segment_angle
+            start_angle = center_angle - segment_angle / 2
+            draw.pieslice(
+                (
+                    center_x - radius,
+                    center_y - radius,
+                    center_x + radius,
+                    center_y + radius,
+                ),
+                start=start_angle,
+                end=start_angle + segment_angle,
+                fill=(
+                    (43, 165, 107)
+                    if index == 0
+                    else (194, 57, 67)
+                    if index in ROULETTE_RED_NUMBERS
+                    else (30, 34, 42)
+                ),
+                outline=(235, 217, 173),
+                width=1,
+            )
+        draw.ellipse(
+            (
+                center_x - 47,
+                center_y - 47,
+                center_x + 47,
+                center_y + 47,
+            ),
+            fill=(24, 35, 54),
+            outline=(235, 217, 173),
+            width=3,
+        )
+        is_final_frame = frame_index == frame_count - 1
+        center_text = str(number) if is_final_frame else "..."
+        draw.text(
+            (center_x, center_y),
+            center_text,
+            font=center_font,
+            fill=(255, 255, 255),
+            anchor="mm",
+        )
+        ball_angle = math.radians(-90)
+        ball_x = center_x + int((radius + 13) * math.cos(ball_angle))
+        ball_y = center_y + int((radius + 13) * math.sin(ball_angle))
+        draw.ellipse(
+            (ball_x - 8, ball_y - 8, ball_x + 8, ball_y + 8),
+            fill=(255, 244, 205),
+            outline=(255, 255, 255),
+            width=2,
+        )
+        draw.text(
+            (width // 2, 294),
+            f"{number} {result_color.upper()}"
+            if is_final_frame
+            else "GIRANDO...",
+            font=result_font,
+            fill=(230, 237, 249),
+            anchor="mm",
+        )
+        frames.append(image)
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[65] * (frame_count - 1) + [1200],
         optimize=False,
         disposal=2,
     )
@@ -7287,6 +7603,20 @@ async def jogar_cassino(
             f"{combination}! Multiplicador x{payout / aposta:g}. "
             f"Combinação: **{drawn}**."
         )
+    result_file = None
+    result_image_url = None
+    if jogo.value == "dados":
+        animation = await asyncio.to_thread(render_dice_gif, roll)
+        result_file = discord.File(animation, filename="dados.gif")
+        result_image_url = "attachment://dados.gif"
+    elif jogo.value == "roleta":
+        animation = await asyncio.to_thread(
+            render_roulette_gif,
+            number,
+            drawn,
+        )
+        result_file = discord.File(animation, filename="roleta.gif")
+        result_image_url = "attachment://roleta.gif"
     settlement = settle_guild_casino_bet(
         guild.id,
         interaction.user.id,
@@ -7324,6 +7654,8 @@ async def jogar_cassino(
         result=result,
         payout=payout,
         balance=balance,
+        file=result_file,
+        image_url=result_image_url,
         view=BetAgainView(
             interaction.user.id,
             jogo.value,
@@ -7685,6 +8017,7 @@ async def dados(
         payout = payout_for_target_rtp(aposta, 1, 6) if won else 0
 
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    animation = await asyncio.to_thread(render_dice_gif, roll)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
         get_house_owner_id(),
@@ -7708,6 +8041,8 @@ async def dados(
         result=f"O dado caiu em **{roll}** ({'par' if roll % 2 == 0 else 'ímpar'}).",
         payout=payout,
         balance=balance,
+        file=discord.File(animation, filename="dados.gif"),
+        image_url="attachment://dados.gif",
         view=BetAgainView(
             interaction.user.id,
             "dados",
@@ -7754,6 +8089,11 @@ async def roleta(
         else 0
     )
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
+    animation = await asyncio.to_thread(
+        render_roulette_gif,
+        number,
+        result_color,
+    )
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
         get_house_owner_id(),
@@ -7777,6 +8117,8 @@ async def roleta(
         result=f"A roleta parou no **{number} {result_color}**.",
         payout=payout,
         balance=balance,
+        file=discord.File(animation, filename="roleta.gif"),
+        image_url="attachment://roleta.gif",
         view=BetAgainView(
             interaction.user.id,
             "roleta",
@@ -8011,7 +8353,7 @@ async def blackjack(
         return
 
     house_owner_id = get_house_owner_id()
-    reserved, balance, reservation_or_reason = reserve_blackjack_bet(
+    reserved, balance, reservation_or_reason, win_streak = reserve_blackjack_bet(
         interaction.user.id,
         house_owner_id,
         aposta,
@@ -8029,9 +8371,8 @@ async def blackjack(
         )
         return
 
-    buycards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-    player_cards = [random.choice(buycards), random.choice(buycards)]
-    dealer_cards = [random.choice(buycards), random.choice(buycards)]
+    player_cards = [draw_blackjack_card(), draw_blackjack_card()]
+    dealer_cards = [draw_blackjack_card(), draw_blackjack_card()]
     game = BlackjackView(
         interaction.user,
         aposta,
@@ -8040,6 +8381,7 @@ async def blackjack(
         balance,
         house_owner_id,
         reservation_or_reason,
+        win_streak,
     )
     if hand_total(player_cards) == 21:
         game.result = "Blackjack! Sua mão inicial chegou a 21."
@@ -8069,7 +8411,7 @@ async def repeat_blackjack(
         return
 
     house_owner_id = get_house_owner_id()
-    reserved, balance, reservation_or_reason = reserve_blackjack_bet(
+    reserved, balance, reservation_or_reason, win_streak = reserve_blackjack_bet(
         interaction.user.id,
         house_owner_id,
         bet,
@@ -8084,15 +8426,15 @@ async def repeat_blackjack(
         await interaction.response.send_message(message, ephemeral=True)
         return
 
-    cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
     game = BlackjackView(
         interaction.user,
         bet,
-        [random.choice(cards), random.choice(cards)],
-        [random.choice(cards), random.choice(cards)],
+        [draw_blackjack_card(), draw_blackjack_card()],
+        [draw_blackjack_card(), draw_blackjack_card()],
         balance,
         house_owner_id,
         reservation_or_reason,
+        win_streak,
     )
     if hand_total(game.player_cards) == 21:
         game.result = "Blackjack! Sua mão inicial chegou a 21."
