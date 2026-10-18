@@ -29,12 +29,14 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "*ATUALIZAÇÕES APÓS A ÚLTIMA REINICIALIZAÇÃO*\n\n"
+    "*ATUALIZACOES APOS A ULTIMA REINICIALIZACAO*\n\n"
     "**RECOMPENSAS GLOBAIS**\n\n"
-    "`/daily`: recebe o maior valor entre 3% do saldo atual e 100 moedas.\n"
-    "`/weekly`: recebe o maior valor entre 8% do saldo atual e 1.000 moedas.\n"
-    "`/monthly`: recebe o maior valor entre 13% do saldo atual e 10.000 moedas.\n\n"
-    "O bônus de prestígio continua aumentando as recompensas daily e weekly."
+    "`/daily`: 3% do saldo atual, com minimo de 100 moedas.\n"
+    "`/weekly`: 8% do saldo atual, com minimo de 1.000 moedas.\n"
+    "`/monthly`: 13% do saldo atual, com minimo de 10.000 moedas.\n\n"
+    "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
+    "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 15 segundos.\n"
+    "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
@@ -737,11 +739,15 @@ class BlacklistView(discord.ui.View):
 COMMAND_SPAM_MAX = 5
 COMMAND_SPAM_WINDOW_SECONDS = 10
 COMMAND_SPAM_BLOCK_SECONDS = 15
+COMMAND_SPAM_ESCALATION_WINDOW_SECONDS = 10 * 60
+COMMAND_SPAM_ESCALATION_LIMIT = 3
+COMMAND_SPAM_ESCALATED_BLOCK_SECONDS = 24 * 60 * 60
 
 
 class CommandSpamGuard:
   def __init__(self) -> None:
     self._timestamps: dict[int, deque[float]] = {}
+    self._restrictions: dict[int, deque[float]] = {}
     self._blocked_until: dict[int, float] = {}
     self._last_cleanup = 0.0
 
@@ -759,6 +765,15 @@ class CommandSpamGuard:
           for tracked_user_id, blocked_until in self._blocked_until.items()
           if blocked_until > current
       }
+      for tracked_user_id, restrictions in list(self._restrictions.items()):
+        while (
+            restrictions
+            and current - restrictions[0]
+            >= COMMAND_SPAM_ESCALATION_WINDOW_SECONDS
+        ):
+          restrictions.popleft()
+        if not restrictions:
+          self._restrictions.pop(tracked_user_id, None)
       self._last_cleanup = current
 
     blocked_until = self._blocked_until.get(user_id, 0.0)
@@ -771,8 +786,24 @@ class CommandSpamGuard:
       timestamps.popleft()
 
     if len(timestamps) >= COMMAND_SPAM_MAX:
-      self._blocked_until[user_id] = current + COMMAND_SPAM_BLOCK_SECONDS
       timestamps.clear()
+      restrictions = self._restrictions.setdefault(user_id, deque())
+      while (
+          restrictions
+          and current - restrictions[0]
+          >= COMMAND_SPAM_ESCALATION_WINDOW_SECONDS
+      ):
+        restrictions.popleft()
+      restrictions.append(current)
+
+      if len(restrictions) >= COMMAND_SPAM_ESCALATION_LIMIT:
+        restrictions.clear()
+        self._blocked_until[user_id] = (
+            current + COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
+        )
+        return COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
+
+      self._blocked_until[user_id] = current + COMMAND_SPAM_BLOCK_SECONDS
       return COMMAND_SPAM_BLOCK_SECONDS
 
     timestamps.append(current)
@@ -790,9 +821,14 @@ class BlacklistCommandTree(app_commands.CommandTree):
     retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id)
     if retry_after is not None:
       if not interaction.response.is_done():
+        duration_label = (
+            " (24 horas)"
+            if retry_after >= COMMAND_SPAM_ESCALATED_BLOCK_SECONDS
+            else ""
+        )
         await interaction.response.send_message(
             "⏳ Você está usando comandos rápido demais. Aguarde "
-            f"**{retry_after} segundos** antes de tentar novamente.",
+            f"**{retry_after} segundos{duration_label}** antes de tentar novamente.",
             ephemeral=True,
         )
       return False
