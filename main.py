@@ -42,6 +42,8 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "trabalho e roubo, além das recompensas globais e do cassino local.\n\n"
     "O comando `/resetar_dados_jogadores` ganhou opções para liberar cada tipo "
     "de cooldown separadamente ou todos de uma vez.\n\n"
+    "Corrigida a migração do banco para reservas antigas de blackjack, "
+    "evitando falhas nas apostas dos NPCs e nos jogos que consultam essas reservas.\n\n"
     "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
@@ -483,6 +485,13 @@ def initialize_economy() -> None:
                 "PRAGMA table_info(house_bet_reservations)"
             )
         }
+        if "house_BOT_OWNER_ID" not in reservation_columns:
+            connection.execute(
+                "ALTER TABLE house_bet_reservations "
+                "ADD COLUMN house_BOT_OWNER_ID INTEGER NOT NULL "
+                f"DEFAULT {BOT_OWNER_ID}"
+            )
+            reservation_columns.add("house_BOT_OWNER_ID")
         if "exposure" not in reservation_columns:
             connection.execute(
                 "ALTER TABLE house_bet_reservations "
