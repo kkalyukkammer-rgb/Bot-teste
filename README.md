@@ -83,7 +83,10 @@ O owner do bot pode usar `/resetar_dados_jogadores` para zerar saldos ou
 liberar cooldowns de recompensas, apostas em animais, trabalho, roubo ou todos
 de uma vez. O comando pede confirmação; os caixas dos cassinos e o histórico
 estatístico são preservados ao zerar saldos.
-A recompensa mensal global varia de 1.000 a 20.000 moedas.
+As recompensas globais usam o saldo atual no momento do resgate: daily paga o
+maior entre 3% do saldo e 100 moedas; weekly, 8% ou 1.000 moedas; monthly,
+13% ou 10.000 moedas. O upgrade de prestígio continua aumentando daily e
+weekly em 10% por nível.
 
 Qualquer apostador pode usar `/feedback` para enviar uma sugestão ou opinião
 diretamente por mensagem privada ao owner do bot. O bot confirma em uma

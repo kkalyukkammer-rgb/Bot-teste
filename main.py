@@ -28,25 +28,12 @@ UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
 UPDATE_ANNOUNCEMENT_MESSAGE = (
-    "*MINI UPDATE*\n\n"
-    "**NOVOS JOGOS**\n\n"
-    "Agora voc\u00ea pode jogar `/raspadinha`, combinando tr\u00eas s\u00edmbolos, e "
-    "`/campo_minado`, escolhendo abrir de 1 a 5 casas e controlar o risco.\n\n"
-    "Os dois jogos t\u00eam GIFs animados pr\u00f3prios, bot\u00e3o para repetir a aposta "
-    "e retorno esperado pr\u00f3ximo de 95%, antes dos b\u00f4nus de prest\u00edgio.\n\n"
-    "Os jogos tamb\u00e9m est\u00e3o dispon\u00edveis em `/jogar_cassino`: Campo Minado "
-    "a partir do n\u00edvel 2 e Raspadinha no n\u00edvel 3. Eles foram inclu\u00eddos no "
-    "guia `/ajuda`.\n\n"
-    "**STATUS E COOLDOWNS**\n\n"
-    "`/status_apostador` agora mostra também os cooldowns de aposta em animais, "
-    "trabalho e roubo, além das recompensas globais e do cassino local.\n\n"
-    "O comando `/resetar_dados_jogadores` ganhou opções para liberar cada tipo "
-    "de cooldown separadamente ou todos de uma vez.\n\n"
-    "Corrigida a migração de bancos antigos: reservas de blackjack e "
-    "proprietários de cassinos locais mantêm compatibilidade com apostas dos NPCs.\n\n"
-    "O limite de NPCs da casa principal foi aumentado para 500; os upgrades "
-    "de quantidade agora podem chegar a esse total.\n\n"
-    "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
+    "*ATUALIZAÇÕES APÓS A ÚLTIMA REINICIALIZAÇÃO*\n\n"
+    "**RECOMPENSAS GLOBAIS**\n\n"
+    "`/daily`: recebe o maior valor entre 3% do saldo atual e 100 moedas.\n"
+    "`/weekly`: recebe o maior valor entre 8% do saldo atual e 1.000 moedas.\n"
+    "`/monthly`: recebe o maior valor entre 13% do saldo atual e 10.000 moedas.\n\n"
+    "O bônus de prestígio continua aumentando as recompensas daily e weekly."
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
@@ -63,9 +50,9 @@ ECONOMY_DB_PATH = os.getenv(
     DEFAULT_ECONOMY_DB_PATH,
 )
 REWARD_SETTINGS = {
-    "daily": ("daily_claim_at", 24 * 60 * 60, 1, 100, "diária"),
-    "weekly": ("weekly_claim_at", 7 * 24 * 60 * 60, 100, 1000, "semanal"),
-    "monthly": ("monthly_claim_at", 30 * 24 * 60 * 60, 1000, 20000, "mensal"),
+    "daily": ("daily_claim_at", 24 * 60 * 60, 3, 100, "diária"),
+    "weekly": ("weekly_claim_at", 7 * 24 * 60 * 60, 8, 1_000, "semanal"),
+    "monthly": ("monthly_claim_at", 30 * 24 * 60 * 60, 13, 10_000, "mensal"),
 }
 SLOT_SYMBOLS = ("🍒", "🍋", "🔔", "💎", "⭐", "7️⃣")
 SLOT_WEIGHTS = (35, 30, 18, 10, 5, 2)
@@ -3899,7 +3886,7 @@ def place_animal_bet(user_id: int, amount: int) -> tuple[str, int, int]:
 
 
 def claim_reward(user_id: int, reward_type: str) -> tuple[bool, int, int]:
-    claim_column, cooldown, minimum, maximum, _ = REWARD_SETTINGS[reward_type]
+    claim_column, cooldown, reward_percent, minimum_reward, _ = REWARD_SETTINGS[reward_type]
     now = int(time.time())
 
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
@@ -3908,19 +3895,18 @@ def claim_reward(user_id: int, reward_type: str) -> tuple[bool, int, int]:
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
             (user_id,),
         )
-        last_claim = connection.execute(
-            f"SELECT {claim_column} FROM economy_accounts WHERE user_id = ?",
+        balance, last_claim = connection.execute(
+            f"SELECT balance, {claim_column} FROM economy_accounts WHERE user_id = ?",
             (user_id,),
-        ).fetchone()[0]
+        ).fetchone()
         if last_claim is not None and now - last_claim < cooldown:
             remaining = cooldown - (now - last_claim)
-            balance = connection.execute(
-                "SELECT balance FROM economy_accounts WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()[0]
             return False, balance, remaining
 
-        reward = random.randint(minimum, maximum)
+        reward = max(
+            minimum_reward,
+            (balance * reward_percent + 99) // 100,
+        )
         if reward_type in ("daily", "weekly"):
             reward_upgrade = connection.execute(
                 """
