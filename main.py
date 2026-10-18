@@ -765,7 +765,9 @@ async def verificar_usuario_bloqueado(interaction: discord.Interaction) -> bool:
 
 class BlacklistView(discord.ui.View):
   async def interaction_check(self, interaction: discord.Interaction) -> bool:
-    return not await verificar_usuario_bloqueado(interaction)
+    if await verificar_usuario_bloqueado(interaction):
+      return False
+    return await verificar_desafio_antimacro(interaction)
 
 
 COMMAND_SPAM_MAX = 5
@@ -969,6 +971,33 @@ def get_macro_captcha_view(user_id: int) -> tuple[str, MacroCaptchaView]:
   return prompt, MacroCaptchaView(user_id, answer, options)
 
 
+async def verificar_desafio_antimacro(
+    interaction: discord.Interaction,
+) -> bool:
+  user_id = interaction.user.id
+  challenge = MACRO_CHECK_PENDING.get(user_id)
+  if challenge is not None:
+    prompt, captcha_view = get_macro_captcha_view(user_id)
+    await interaction.response.send_message(
+        f"{prompt}\nResolva o desafio para continuar usando o bot.",
+        view=captcha_view,
+        ephemeral=True,
+    )
+    return False
+
+  current_time = time.monotonic()
+  if current_time < MACRO_CHECK_NEXT_AT.get(user_id, 0.0):
+    return True
+
+  prompt, captcha_view = get_macro_captcha_view(user_id)
+  await interaction.response.send_message(
+      f"{prompt}\nResolva o desafio para continuar usando o bot.",
+      view=captcha_view,
+      ephemeral=True,
+  )
+  return False
+
+
 async def notify_owner_of_command_punishment(
     interaction: discord.Interaction,
     duration_seconds: int,
@@ -1042,26 +1071,10 @@ class BlacklistCommandTree(app_commands.CommandTree):
     if await verificar_usuario_bloqueado(interaction):
       return False
 
-    if interaction.user.id in MACRO_CHECK_PENDING:
-      prompt, captcha_view = get_macro_captcha_view(interaction.user.id)
-      await interaction.response.send_message(
-          f"{prompt}\nResolva o desafio para continuar usando comandos.",
-          view=captcha_view,
-          ephemeral=True,
-      )
-      return False
-    current_time = time.monotonic()
-    next_challenge_at = MACRO_CHECK_NEXT_AT.get(interaction.user.id, 0.0)
-    challenge_ready = current_time >= next_challenge_at
-    if challenge_ready:
-      prompt, captcha_view = get_macro_captcha_view(interaction.user.id)
-      await interaction.response.send_message(
-          f"{prompt}\nResolva o desafio para continuar usando comandos.",
-          view=captcha_view,
-          ephemeral=True,
-      )
+    if not await verificar_desafio_antimacro(interaction):
       return False
 
+    current_time = time.monotonic()
     retry_after = COMMAND_SPAM_GUARD.check(interaction.user.id, now=current_time)
     if retry_after is not None:
       if COMMAND_SPAM_GUARD.last_punishment_applied:
@@ -2423,6 +2436,8 @@ class BetAgainView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.user_id:
             return True
@@ -4486,6 +4501,8 @@ class BlackjackView(BlacklistView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
             return False
+        if not await verificar_desafio_antimacro(interaction):
+            return False
         if interaction.user.id != self.user.id:
             await interaction.response.send_message(
                 "Esta partida pertence a outra pessoa.",
@@ -4758,6 +4775,8 @@ class BlackjackAgainView(BlacklistView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
             return False
+        if not await verificar_desafio_antimacro(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -4786,6 +4805,8 @@ class PrestigeConfirmView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.user_id:
             return True
@@ -4849,6 +4870,8 @@ class PrestigeUpgradeView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.user_id:
             return True
@@ -4944,6 +4967,8 @@ class DeleteGuildCasinoView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.BOT_OWNER_ID:
             return True
@@ -6103,6 +6128,8 @@ class DuelView(BlacklistView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
             return False
+        if not await verificar_desafio_antimacro(interaction):
+            return False
         if interaction.user.id not in (self.challenger.id, self.opponent.id):
             await interaction.response.send_message(
                 "Este desafio é privado entre os dois jogadores mencionados.",
@@ -6420,6 +6447,8 @@ class DuelAgainView(BlacklistView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
             return False
+        if not await verificar_desafio_antimacro(interaction):
+            return False
         if interaction.user.id in (self.challenger.id, self.opponent.id):
             return True
         await interaction.response.send_message(
@@ -6688,6 +6717,8 @@ class JobSelectView(BlacklistView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
             return False
+        if not await verificar_desafio_antimacro(interaction):
+            return False
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
@@ -6906,6 +6937,8 @@ class PlayerDataResetView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.BOT_OWNER_ID == BOT_OWNER_ID:
             return True
@@ -8449,6 +8482,8 @@ class GuildCasinoUpgradeView(BlacklistView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
+            return False
+        if not await verificar_desafio_antimacro(interaction):
             return False
         if interaction.user.id == self.BOT_OWNER_ID:
             return True
