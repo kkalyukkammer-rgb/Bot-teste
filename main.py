@@ -43,7 +43,7 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
-    "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 15 segundos.\n"
+    "Apos 5 comandos em 10 segundos, ha um bloqueio temporario de 17 segundos.\n"
     "A terceira restricao em uma janela de 10 minutos bloqueia comandos por 24 horas.\n\n"
     "**SERVIDORES AUTORIZADOS**\n\n"
     "Os comandos funcionam apenas em servidores liberados pelo dono. O servidor principal e o servidor dos anuncios.\n"
@@ -765,7 +765,7 @@ class BlacklistView(discord.ui.View):
 
 COMMAND_SPAM_MAX = 5
 COMMAND_SPAM_WINDOW_SECONDS = 10
-COMMAND_SPAM_BLOCK_SECONDS = 15
+COMMAND_SPAM_BLOCK_SECONDS = 17
 COMMAND_SPAM_ESCALATION_WINDOW_SECONDS = 10 * 60
 COMMAND_SPAM_ESCALATION_LIMIT = 3
 COMMAND_SPAM_ESCALATED_BLOCK_SECONDS = 24 * 60 * 60
