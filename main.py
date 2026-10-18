@@ -34,6 +34,8 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/daily`: 3% do saldo atual, com minimo de 100 moedas.\n"
     "`/weekly`: 8% do saldo atual, com minimo de 1.000 moedas.\n"
     "`/monthly`: 13% do saldo atual, com minimo de 10.000 moedas.\n\n"
+    "**LIMITES DE APOSTA**\n\n"
+    "O limite base agora e 10.000.000 moedas. Cada upgrade de prestigio acrescenta 1.000.000, ate o maximo de 20.000.000.\n\n"
     "**PAGAMENTOS DOS JOGOS**\n\n"
     "`/dados`: par/impar retorna x1,75; numero exato retorna x2,5.\n"
     "`/jogar_cassino` permite escolher a casa principal (saldo global) ou o cassino deste servidor (saldo local).\n"
@@ -196,8 +198,8 @@ CASINO_ROLE_REFRESH_COMMANDS = CASINO_PARTICIPANT_COMMANDS | frozenset(
 PRESTIGE_STARTING_REQUIREMENT = 1_000_000
 PRESTIGE_MAX_LEVEL = 28
 PRESTIGE_MAX_UPGRADE_LEVEL = 10
-PLAYER_BASE_BET_LIMIT = 100_000_000
-PLAYER_BET_LIMIT_PER_UPGRADE = 150_000
+PLAYER_BASE_BET_LIMIT = 10_000_000
+PLAYER_BET_LIMIT_PER_UPGRADE = 1_000_000
 PLAYER_BET_PARAMETER_MAX = (
     PLAYER_BASE_BET_LIMIT
     + PRESTIGE_MAX_UPGRADE_LEVEL * PLAYER_BET_LIMIT_PER_UPGRADE
@@ -205,7 +207,7 @@ PLAYER_BET_PARAMETER_MAX = (
 PRESTIGE_UPGRADES = {
     "gains": ("prestige_upgrade_gains", "Ganhos em apostas", 5),
     "rewards": ("prestige_upgrade_rewards", "Rewards diários e semanais", 10),
-    "bet_limit": ("prestige_upgrade_bet_limit", "Limite de aposta", 100_000),
+    "bet_limit": ("prestige_upgrade_bet_limit", "Limite de aposta", 1_000_000),
 }
 AUTOROLE_CONDITIONS = {
     "participation": "participação em jogos",
@@ -6280,7 +6282,7 @@ async def prestigio(interaction: discord.Interaction) -> None:
     upgrade=[
         app_commands.Choice(name="Ganhos em apostas (+5% por nível)", value="gains"),
         app_commands.Choice(name="Rewards daily/weekly (+10% por nível)", value="rewards"),
-        app_commands.Choice(name="Limite de aposta (+100.000 por nível)", value="bet_limit"),
+        app_commands.Choice(name="Limite de aposta (+1.000.000 por nível)", value="bet_limit"),
     ]
 )
 async def upgrade_prestigio(
@@ -8661,7 +8663,7 @@ async def jogar_cassino(
 
 @bot.tree.command(name="cacaniquel", description="Gire a máquina caça-níquel usando suas moedas.")
 @app_commands.guild_only()
-@app_commands.describe(aposta="Quantidade de moedas para apostar (de 1 a 1.000.000).")
+@app_commands.describe(aposta="Quantidade de moedas para apostar; limite de ate 20.000.000, conforme upgrades.")
 async def cacaniquel(
     interaction: discord.Interaction,
     aposta: app_commands.Range[int, 1, PLAYER_BET_PARAMETER_MAX],
