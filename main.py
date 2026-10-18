@@ -10,11 +10,13 @@ import tempfile
 import time
 import unicodedata
 from typing import Literal
+import json
+
 
 import discord
 from discord import app_commands
 from PIL import Image, ImageDraw, ImageFont
-
+from discord.ext import commands
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,7 +28,7 @@ BOT_OWNER_ID = 1079199747019112520
 UPDATE_ANNOUNCEMENT_GUILD_ID = 1467549007932030998
 UPDATE_ANNOUNCEMENT_CHANNEL_ID = 1560451788254216343
 UPDATE_ANNOUNCEMENT_ROLE_ID = 1559362476921987072
-BLACKLIST = [961704797491314719]
+BLACKLIST_FILE = "blacklist.json"
 UPDATE_ANNOUNCEMENT_MESSAGE = (
     "*MINI UPDATE*\n\n"
     "**BALANCEAMENTOS E QOL** \n\n"
@@ -367,7 +369,7 @@ def initialize_economy() -> None:
             """
             CREATE TABLE IF NOT EXISTS guild_casinos (
                 guild_id INTEGER PRIMARY KEY,
-                owner_id INTEGER NOT NULL,
+                BOT_OWNER_ID INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 currency_name TEXT NOT NULL,
                 treasury INTEGER NOT NULL DEFAULT 0,
@@ -446,7 +448,7 @@ def initialize_economy() -> None:
             CREATE TABLE IF NOT EXISTS house_bet_reservations (
                 reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                house_owner_id INTEGER NOT NULL,
+                house_BOT_OWNER_ID INTEGER NOT NULL,
                 amount INTEGER NOT NULL,
                 exposure INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
@@ -560,11 +562,115 @@ def initialize_economy() -> None:
                     f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
                 
-async def block_blacklisted_users(ctx):
-  if ctx.author.id in BLACKLIST:
-    await ctx.whisper("Você não pode enviar comando")
-    return False  # Bloqueia a execução
+def carregar_blacklist():
+  if os.path.exists(BLACKLIST_FILE):
+    with open(BLACKLIST_FILE, "r") as f:
+      return json.load(f)
+  return []
+
+
+def salvar_blacklist(lista):
+  with open(BLACKLIST_FILE, "w") as f:
+    json.dump(lista, f, indent=4)
+
+
+class MeuBot(commands.Bot):
+
+  def __init__(self):
+    intents = discord.Intents.default()
+    super().__init__(command_prefix="!", intents=intents)
+
+  async def setup_hook(self):
+    await self.tree.sync()
+    print("Comandos slash sincronizados!")
+
+
+bot = MeuBot()
+
+
+# Verificação global para comandos de barra (Slash Commands)
+@bot.tree.interaction_check
+async def verificar_blacklist(interaction: discord.Interaction) -> bool:
+  blacklist = carregar_blacklist()
+
+  # Se o usuário estiver na blacklist e não for o owner
+  if interaction.user.id in blacklist and interaction.user.id != BOT_OWNER_ID:
+    await interaction.response.send_message(
+        "❌ Você está **bloqueado** de usar os comandos deste bot.",
+        ephemeral=True,
+    )
+    return False
+
   return True
+
+
+# ---------------------------------------------------------
+# COMANDOS PARA O OWNER (Bloquear / Desbloquear / Listar)
+# ---------------------------------------------------------
+
+
+@bot.tree.command(
+    name="bloquear", description="Bloqueia um usuário de usar os comandos (Owner)"
+)
+@app_commands.describe(usuario="O usuário que deseja bloquear")
+async def bloquear(interaction: discord.Interaction, usuario: discord.Member):
+  # Verifica se quem está executando é o Owner
+  if interaction.user.id != BOT_OWNER_ID:
+    return await interaction.response.send_message(
+        "❌ Apenas o dono do bot pode usar este comando.", ephemeral=True
+    )
+
+  blacklist = carregar_blacklist()
+
+  if usuario.id == BOT_OWNER_ID:
+    return await interaction.response.send_message(
+        "⚠️ Você não pode bloquear o dono do bot.", ephemeral=True
+    )
+
+  if usuario.id in blacklist:
+    return await interaction.response.send_message(
+        f"⚠️ O usuário {usuario.mention} já está bloqueado.", ephemeral=True
+    )
+
+  blacklist.append(usuario.id)
+  salvar_blacklist(blacklist)
+
+  await interaction.response.send_message(
+      f"🚫 O usuário {usuario.mention} foi **bloqueado** dos comandos do bot.",
+      ephemeral=True,
+  )
+
+
+@bot.tree.command(
+    name="desbloquear",
+    description="Desbloqueia um usuário dos comandos (Owner)",
+)
+@app_commands.describe(usuario="O usuário que deseja desbloquear")
+async def desbloquear(
+    interaction: discord.Interaction, usuario: discord.Member
+):
+  if interaction.user.id != BOT_OWNER_ID:
+    return await interaction.response.send_message(
+        "❌ Apenas o dono do bot pode usar este comando.", ephemeral=True
+    )
+
+  blacklist = carregar_blacklist()
+
+  if usuario.id not in blacklist:
+    return await interaction.response.send_message(
+        f"⚠️ O usuário {usuario.mention} não está na lista de bloqueados.",
+        ephemeral=True,
+    )
+
+  blacklist.remove(usuario.id)
+  salvar_blacklist(blacklist)
+
+  await interaction.response.send_message(
+      f"✅ O usuário {usuario.mention} foi **desbloqueado** dos comandos do bot.",
+      ephemeral=True,
+  )
+
+
 
 def migrate_legacy_economy_database(
     database_path: str,
@@ -717,12 +823,12 @@ async def synchronize_casino_autoroles(
             }
             for row in global_accounts
         }
-        main_house_owner_id = get_house_owner_id()
+        main_house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
         global_ranked = sorted(
             (
                 row
                 for row in global_accounts
-                if row[0] != main_house_owner_id
+                if row[0] != main_house_BOT_OWNER_ID
             ),
             key=lambda row: (-row[1], -row[2], row[3], row[0]),
         )
@@ -731,10 +837,10 @@ async def synchronize_casino_autoroles(
         }
 
         casino = connection.execute(
-            "SELECT owner_id FROM guild_casinos WHERE guild_id = ?",
+            "SELECT BOT_OWNER_ID FROM guild_casinos WHERE guild_id = ?",
             (guild.id,),
         ).fetchone()
-        casino_owner_id = casino[0] if casino else None
+        casino_BOT_OWNER_ID = casino[0] if casino else None
         local_accounts: list[tuple[int, int, int, int]] = []
         if casino is not None:
             for start in range(0, len(member_id_list), 900):
@@ -755,7 +861,7 @@ async def synchronize_casino_autoroles(
             (
                 row
                 for row in local_accounts
-                if row[0] not in (main_house_owner_id, casino_owner_id)
+                if row[0] not in (main_house_BOT_OWNER_ID, casino_BOT_OWNER_ID)
             ),
             key=lambda row: (-row[1], -row[2], row[3], row[0]),
         )
@@ -879,7 +985,7 @@ async def ensure_betting_channel(interaction: discord.Interaction) -> bool:
 
 
 async def ensure_not_house_owner(interaction: discord.Interaction) -> bool:
-    if interaction.user.id != get_house_owner_id():
+    if interaction.user.id != get_house_BOT_OWNER_ID():
         return True
     await interaction.response.send_message(
         "O owner do bot é a banca principal e não pode apostar contra ela.",
@@ -1018,7 +1124,7 @@ def prestige_player(user_id: int) -> tuple[str, int, int, int, int]:
             "SELECT prestige_points FROM economy_accounts WHERE user_id = ?",
             (user_id,),
         ).fetchone()[0]
-        if user_id == BOT_OWNER_ID:
+        if user_id == BOT_BOT_OWNER_ID:
             return "house_owner", balance, prestige_level, points, 0
         active_bet = connection.execute(
             "SELECT 1 FROM house_bet_reservations WHERE user_id = ? LIMIT 1",
@@ -1072,7 +1178,7 @@ def purchase_prestige_upgrade(
             """,
             (user_id,),
         ).fetchone()
-        if user_id == BOT_OWNER_ID:
+        if user_id == BOT_BOT_OWNER_ID:
             return "house_owner", points, level, 0
         if connection.execute(
             "SELECT 1 FROM house_bet_reservations WHERE user_id = ? LIMIT 1",
@@ -1147,16 +1253,16 @@ def get_player_bet_limit(user_id: int) -> int:
     return PLAYER_BASE_BET_LIMIT + level * PLAYER_BET_LIMIT_PER_UPGRADE
 
 
-def set_house_owner_id(owner_id: int) -> None:
-    if owner_id != BOT_OWNER_ID:
-        raise ValueError("O proprietário da casa principal é definido pelo BOT_OWNER_ID.")
+def set_house_BOT_OWNER_ID(BOT_OWNER_ID: int) -> None:
+    if BOT_OWNER_ID != BOT_BOT_OWNER_ID:
+        raise ValueError("O proprietário da casa principal é definido pelo BOT_BOT_OWNER_ID.")
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute(
             """
-            INSERT INTO casino_settings (setting, value) VALUES ('house_owner_id', ?)
+            INSERT INTO casino_settings (setting, value) VALUES ('house_BOT_OWNER_ID', ?)
             ON CONFLICT(setting) DO UPDATE SET value = excluded.value
             """,
-            (owner_id,),
+            (BOT_OWNER_ID,),
         )
         connection.execute(
             """
@@ -1166,12 +1272,12 @@ def set_house_owner_id(owner_id: int) -> None:
                 AND economy_accounts.total_earned = 0
                 AND economy_accounts.total_lost = 0
             """,
-            (owner_id, MAIN_HOUSE_STARTING_BALANCE),
+            (BOT_OWNER_ID, MAIN_HOUSE_STARTING_BALANCE),
         )
 
 
-def get_house_owner_id() -> int:
-    return BOT_OWNER_ID
+def get_house_BOT_OWNER_ID() -> int:
+    return BOT_BOT_OWNER_ID
 
 
 def increment_house_stat(
@@ -1225,7 +1331,7 @@ def get_main_house_status() -> dict[str, int]:
             SELECT balance, total_earned, total_lost
             FROM economy_accounts WHERE user_id = ?
             """,
-            (BOT_OWNER_ID,),
+            (BOT_BOT_OWNER_ID,),
         ).fetchone()
         house_stats = dict(
             connection.execute(
@@ -1249,9 +1355,9 @@ def get_main_house_status() -> dict[str, int]:
         reservations = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ?
+            WHERE house_BOT_OWNER_ID = ?
             """,
-            (BOT_OWNER_ID,),
+            (BOT_BOT_OWNER_ID,),
         ).fetchone()[0]
         casino_count, local_treasury = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(treasury), 0) FROM guild_casinos"
@@ -1362,7 +1468,7 @@ def upgrade_main_house(
     expected_level: int | None = None,
     expected_npc_count: int | None = None,
 ) -> tuple[str, int, int, int, int]:
-    if user_id != BOT_OWNER_ID:
+    if user_id != BOT_BOT_OWNER_ID:
         return "not_owner", 0, 0, 0, 0
     if upgrade_type not in {"npc_count", "npc_bet"}:
         raise ValueError(f"Tipo de upgrade da casa principal inválido: {upgrade_type}")
@@ -1885,7 +1991,7 @@ async def repeat_bet(
     if game == "jogo_do_bixo":
         bet_status, balance, remaining = settle_animal_house_bet(
             interaction.user.id,
-            get_house_owner_id(),
+            get_house_BOT_OWNER_ID(),
             bet,
             payout,
         )
@@ -1907,7 +2013,7 @@ async def repeat_bet(
         status, balance, treasury, tax_percent, tax = settle_guild_casino_bet(
             guild_id,
             interaction.user.id,
-            get_house_owner_id(),
+            get_house_BOT_OWNER_ID(),
             bet,
             payout,
         )
@@ -1954,7 +2060,7 @@ async def repeat_bet(
     else:
         settled, balance, _ = settle_house_bet(
             interaction.user.id,
-            get_house_owner_id(),
+            get_house_BOT_OWNER_ID(),
             bet,
             payout,
         )
@@ -1986,9 +2092,9 @@ def get_leaderboard(user_ids: list[int]) -> list[tuple[int, int, int, int]]:
     accounts: list[tuple[int, int, int, int]] = []
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         owner_setting = connection.execute(
-            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+            "SELECT value FROM casino_settings WHERE setting = 'house_BOT_OWNER_ID'"
         ).fetchone()
-        house_owner_id = owner_setting[0] if owner_setting else None
+        house_BOT_OWNER_ID = owner_setting[0] if owner_setting else None
         for start in range(0, len(user_ids), 900):
             batch = user_ids[start : start + 900]
             placeholders = ",".join("?" for _ in batch)
@@ -2003,9 +2109,9 @@ def get_leaderboard(user_ids: list[int]) -> list[tuple[int, int, int, int]]:
                 ).fetchall()
             )
 
-    if house_owner_id is not None:
+    if house_BOT_OWNER_ID is not None:
         accounts = [
-            account for account in accounts if account[0] != house_owner_id
+            account for account in accounts if account[0] != house_BOT_OWNER_ID
         ]
     return sorted(
         accounts,
@@ -2064,7 +2170,7 @@ def change_player_job(user_id: int, job_key: str) -> tuple[str, int]:
             (user_id,),
         )
         if connection.execute(
-            "SELECT 1 FROM guild_casinos WHERE owner_id = ? LIMIT 1",
+            "SELECT 1 FROM guild_casinos WHERE BOT_OWNER_ID = ? LIMIT 1",
             (user_id,),
         ).fetchone() is not None:
             balance = connection.execute(
@@ -2250,12 +2356,12 @@ def record_bet_activity(
 
 def settle_house_bet(
     user_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     bet: int,
     payout: int,
 ) -> tuple[bool, int, int]:
-    if user_id == house_owner_id:
-        return False, get_balance(user_id), get_balance(house_owner_id)
+    if user_id == house_BOT_OWNER_ID:
+        return False, get_balance(user_id), get_balance(house_BOT_OWNER_ID)
     if bet <= 0 or payout < 0:
         raise ValueError("A aposta precisa ser positiva e o retorno não pode ser negativo.")
 
@@ -2265,7 +2371,7 @@ def settle_house_bet(
         connection.execute("BEGIN IMMEDIATE")
         connection.executemany(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            ((user_id,), (house_owner_id,)),
+            ((user_id,), (house_BOT_OWNER_ID,)),
         )
         balances = {
             account_id: balance
@@ -2274,20 +2380,20 @@ def settle_house_bet(
                 SELECT user_id, balance FROM economy_accounts
                 WHERE user_id IN (?, ?)
                 """,
-                (user_id, house_owner_id),
+                (user_id, house_BOT_OWNER_ID),
             )
         }
         player_balance = balances[user_id]
-        house_balance = balances[house_owner_id]
+        house_balance = balances[house_BOT_OWNER_ID]
         if player_balance < bet:
             return False, player_balance, house_balance
 
         reservations = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ?
+            WHERE house_BOT_OWNER_ID = ?
             """,
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         if house_change < 0 and house_balance - reservations < -house_change:
             return False, player_balance, house_balance
@@ -2321,7 +2427,7 @@ def settle_house_bet(
                 house_change,
                 max(house_change, 0),
                 max(-house_change, 0),
-                house_owner_id,
+                house_BOT_OWNER_ID,
             ),
         )
         increment_house_stat(connection, "main_house_games")
@@ -2332,10 +2438,10 @@ def settle_house_bet(
 
 def reserve_blackjack_bet(
     user_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     bet: int,
 ) -> tuple[bool, int, str, int]:
-    if user_id == house_owner_id:
+    if user_id == house_BOT_OWNER_ID:
         return False, get_balance(user_id), "owner", 0
     if bet <= 0:
         raise ValueError("A aposta precisa ser positiva.")
@@ -2344,7 +2450,7 @@ def reserve_blackjack_bet(
         connection.execute("BEGIN IMMEDIATE")
         connection.executemany(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            ((user_id,), (house_owner_id,)),
+            ((user_id,), (house_BOT_OWNER_ID,)),
         )
         player_balance = connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
@@ -2352,7 +2458,7 @@ def reserve_blackjack_bet(
         ).fetchone()[0]
         house_balance = connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         bonus_levels = connection.execute(
             """
@@ -2376,9 +2482,9 @@ def reserve_blackjack_bet(
         reserved = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ?
+            WHERE house_BOT_OWNER_ID = ?
             """,
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         if player_balance < bet:
             return False, player_balance, "player", 0
@@ -2396,10 +2502,10 @@ def reserve_blackjack_bet(
         reservation = connection.execute(
             """
             INSERT INTO house_bet_reservations
-                (user_id, house_owner_id, amount, exposure, created_at)
+                (user_id, house_BOT_OWNER_ID, amount, exposure, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (user_id, house_owner_id, bet, exposure, int(time.time())),
+            (user_id, house_BOT_OWNER_ID, bet, exposure, int(time.time())),
         )
         record_bet_activity(connection, user_id, bet)
         return True, player_balance - bet, str(reservation.lastrowid), win_streak
@@ -2408,7 +2514,7 @@ def reserve_blackjack_bet(
 def settle_blackjack_bet(
     reservation_id: str,
     user_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     bet: int,
     payout: int,
 ) -> int:
@@ -2417,23 +2523,23 @@ def settle_blackjack_bet(
         reservation = connection.execute(
             """
             SELECT amount, exposure FROM house_bet_reservations
-            WHERE reservation_id = ? AND user_id = ? AND house_owner_id = ?
+            WHERE reservation_id = ? AND user_id = ? AND house_BOT_OWNER_ID = ?
             """,
-            (int(reservation_id), user_id, house_owner_id),
+            (int(reservation_id), user_id, house_BOT_OWNER_ID),
         ).fetchone()
         if reservation is None or reservation[0] != bet:
             raise RuntimeError("A reserva desta partida de blackjack não foi encontrada.")
 
         house_balance = connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         other_reservations = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ? AND reservation_id != ?
+            WHERE house_BOT_OWNER_ID = ? AND reservation_id != ?
             """,
-            (house_owner_id, int(reservation_id)),
+            (house_BOT_OWNER_ID, int(reservation_id)),
         ).fetchone()[0]
         house_change = bet - payout
         if house_change < 0 and house_balance - other_reservations < -house_change:
@@ -2461,7 +2567,7 @@ def settle_blackjack_bet(
                 house_change,
                 max(house_change, 0),
                 max(-house_change, 0),
-                house_owner_id,
+                house_BOT_OWNER_ID,
             ),
         )
         connection.execute(
@@ -2548,10 +2654,10 @@ def settle_duel_bets(
 
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
-        house_owner_id = get_house_owner_id()
+        house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
         connection.execute(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         )
         if winner_id is None:
             winner_winnings = 0
@@ -2585,7 +2691,7 @@ def settle_duel_bets(
             ) - profit
             house_balance = connection.execute(
                 "SELECT balance FROM economy_accounts WHERE user_id = ?",
-                (house_owner_id,),
+                (house_BOT_OWNER_ID,),
             ).fetchone()[0]
             actual_bonus = min(requested_bonus, house_balance + house_fee)
             winner_winnings = base_winnings + actual_bonus
@@ -2610,7 +2716,7 @@ def settle_duel_bets(
                     house_change,
                     max(house_change, 0),
                     max(-house_change, 0),
-                    house_owner_id,
+                    house_BOT_OWNER_ID,
                 ),
             )
 
@@ -2640,13 +2746,13 @@ def settle_duel_bets(
 
 def settle_animal_house_bet(
     user_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     amount: int,
     payout: int,
 ) -> tuple[str, int, int]:
     now = int(time.time())
-    if user_id == house_owner_id:
-        return "owner", get_balance(user_id), get_balance(house_owner_id)
+    if user_id == house_BOT_OWNER_ID:
+        return "owner", get_balance(user_id), get_balance(house_BOT_OWNER_ID)
     if amount <= 0 or payout < 0:
         raise ValueError("A aposta precisa ser positiva e o retorno não pode ser negativo.")
 
@@ -2656,7 +2762,7 @@ def settle_animal_house_bet(
         connection.execute("BEGIN IMMEDIATE")
         connection.executemany(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            ((user_id,), (house_owner_id,)),
+            ((user_id,), (house_BOT_OWNER_ID,)),
         )
         player = connection.execute(
             """
@@ -2674,14 +2780,14 @@ def settle_animal_house_bet(
             )
         house_balance = connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         reservations = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ?
+            WHERE house_BOT_OWNER_ID = ?
             """,
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         if player_balance < amount:
             return "insufficient", player_balance, 0
@@ -2719,7 +2825,7 @@ def settle_animal_house_bet(
                 house_change,
                 max(house_change, 0),
                 max(-house_change, 0),
-                house_owner_id,
+                house_BOT_OWNER_ID,
             ),
         )
         increment_house_stat(connection, "main_house_games")
@@ -2730,7 +2836,7 @@ def get_guild_casino(guild_id: int) -> tuple[int, str, str, int, int] | None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         casino = connection.execute(
             """
-            SELECT owner_id, name, currency_name, treasury, upgrade_level
+            SELECT BOT_OWNER_ID, name, currency_name, treasury, upgrade_level
             FROM guild_casinos WHERE guild_id = ?
             """,
             (guild_id,),
@@ -2763,7 +2869,7 @@ def get_guild_casino_status(
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         return connection.execute(
             """
-            SELECT owner_id, name, currency_name, treasury, upgrade_level,
+            SELECT BOT_OWNER_ID, name, currency_name, treasury, upgrade_level,
                    npc_count, games_played, npc_games, house_earned,
                    house_lost, tax_paid, upgrade_costs_paid,
                    npc_hiring_costs, rewards_paid, player_bet_volume,
@@ -2786,7 +2892,7 @@ def hire_guild_casino_npcs(
         connection.execute("BEGIN IMMEDIATE")
         casino = connection.execute(
             """
-            SELECT owner_id, treasury, npc_count
+            SELECT BOT_OWNER_ID, treasury, npc_count
             FROM guild_casinos WHERE guild_id = ?
             """,
             (guild_id,),
@@ -2794,8 +2900,8 @@ def hire_guild_casino_npcs(
         if casino is None:
             return "missing", 0, 0
 
-        owner_id, treasury, current_npcs = casino
-        if owner_id != user_id:
+        BOT_OWNER_ID, treasury, current_npcs = casino
+        if BOT_OWNER_ID != user_id:
             return "not_owner", treasury, current_npcs
         if current_npcs + amount > CASINO_MAX_NPCS:
             return "max_npcs", treasury, current_npcs
@@ -2843,10 +2949,10 @@ def npc_interval_seconds(owner_online: bool) -> int:
 def run_npc_betting_cycle(
     now: int | None = None,
     main_house_online: bool = False,
-    online_owner_ids_by_guild: dict[int, set[int]] | None = None,
+    online_BOT_OWNER_IDs_by_guild: dict[int, set[int]] | None = None,
 ) -> tuple[int, int]:
     current_time = int(time.time()) if now is None else now
-    online_owner_ids_by_guild = online_owner_ids_by_guild or {}
+    online_BOT_OWNER_IDs_by_guild = online_BOT_OWNER_IDs_by_guild or {}
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         settings = dict(
@@ -2854,7 +2960,7 @@ def run_npc_betting_cycle(
                 """
                 SELECT setting, value FROM casino_settings
                 WHERE setting IN (
-                    'house_owner_id', 'main_house_npcs',
+                    'house_BOT_OWNER_ID', 'main_house_npcs',
                     'main_house_npc_bet_upgrade_level',
                     'main_house_npc_next_bet_at',
                     'main_house_npc_owner_online', 'tax_percent'
@@ -2862,10 +2968,10 @@ def run_npc_betting_cycle(
                 """
             ).fetchall()
         )
-        if "house_owner_id" not in settings:
+        if "house_BOT_OWNER_ID" not in settings:
             return 0, 0
 
-        house_owner_id = settings["house_owner_id"]
+        house_BOT_OWNER_ID = settings["house_BOT_OWNER_ID"]
         main_npc_count = settings["main_house_npcs"]
         main_npc_bet_min, main_npc_bet_max = main_house_npc_bet_range(
             settings["main_house_npc_bet_upgrade_level"]
@@ -2896,33 +3002,33 @@ def run_npc_betting_cycle(
 
         connection.execute(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         )
         house_balance = connection.execute(
             "SELECT balance FROM economy_accounts WHERE user_id = ?",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         main_house_prestige_bonus = connection.execute(
             """
             SELECT COALESCE(SUM(prestige_level), 0)
             FROM economy_accounts WHERE user_id != ?
             """,
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         reservations = connection.execute(
             """
             SELECT COALESCE(SUM(exposure), 0) FROM house_bet_reservations
-            WHERE house_owner_id = ?
+            WHERE house_BOT_OWNER_ID = ?
             """,
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         ).fetchone()[0]
         casinos = connection.execute(
             """
-            SELECT c.guild_id, c.owner_id, c.treasury, c.upgrade_level,
+            SELECT c.guild_id, c.BOT_OWNER_ID, c.treasury, c.upgrade_level,
                    c.npc_count, c.npc_next_bet_at, c.npc_owner_online,
                    COALESCE(a.prestige_level, 0)
             FROM guild_casinos AS c
-            LEFT JOIN economy_accounts AS a ON a.user_id = c.owner_id
+            LEFT JOIN economy_accounts AS a ON a.user_id = c.BOT_OWNER_ID
             """
         ).fetchall()
         casino_progress = {
@@ -2984,9 +3090,9 @@ def run_npc_betting_cycle(
                 (main_house_next_bet_at,),
             )
 
-        for guild_id, owner_id, *_ in casinos:
+        for guild_id, BOT_OWNER_ID, *_ in casinos:
             progress = casino_progress[guild_id]
-            owner_online = owner_id in online_owner_ids_by_guild.get(
+            owner_online = BOT_OWNER_ID in online_BOT_OWNER_IDs_by_guild.get(
                 guild_id,
                 set(),
             )
@@ -3076,7 +3182,7 @@ def run_npc_betting_cycle(
                 total_lost = total_lost + ?
             WHERE user_id = ?
             """,
-            (house_balance, main_house_earned, main_house_lost, house_owner_id),
+            (house_balance, main_house_earned, main_house_lost, house_BOT_OWNER_ID),
         )
         increment_house_stat(connection, "main_house_games", main_bets)
         increment_house_stat(connection, "main_house_npc_games", main_bets)
@@ -3098,7 +3204,7 @@ def get_guild_casino_balance(guild_id: int, user_id: int) -> int:
 def create_guild_casino(
     guild_id: int,
     creator_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     name: str,
     currency_name: str,
 ) -> tuple[str, int, int]:
@@ -3109,11 +3215,11 @@ def create_guild_casino(
             "SELECT 1 FROM guild_casinos WHERE guild_id = ?",
             (guild_id,),
         ).fetchone():
-            return "exists", get_balance(creator_id), get_balance(house_owner_id)
+            return "exists", get_balance(creator_id), get_balance(house_BOT_OWNER_ID)
 
         connection.executemany(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            ((creator_id,), (house_owner_id,)),
+            ((creator_id,), (house_BOT_OWNER_ID,)),
         )
         balances = {
             account_id: balance
@@ -3122,15 +3228,15 @@ def create_guild_casino(
                 SELECT user_id, balance FROM economy_accounts
                 WHERE user_id IN (?, ?)
                 """,
-                (creator_id, house_owner_id),
+                (creator_id, house_BOT_OWNER_ID),
             )
         }
         creator_balance = balances[creator_id]
-        house_balance = balances[house_owner_id]
-        if creator_id != house_owner_id and creator_balance < creation_fee:
+        house_balance = balances[house_BOT_OWNER_ID]
+        if creator_id != house_BOT_OWNER_ID and creator_balance < creation_fee:
             return "insufficient", creator_balance, house_balance
 
-        if creator_id != house_owner_id:
+        if creator_id != house_BOT_OWNER_ID:
             connection.execute(
                 """
                 UPDATE economy_accounts
@@ -3145,14 +3251,14 @@ def create_guild_casino(
                 SET balance = balance + ?, total_earned = total_earned + ?
                 WHERE user_id = ?
                 """,
-                (creation_fee, creation_fee, house_owner_id),
+                (creation_fee, creation_fee, house_BOT_OWNER_ID),
             )
             creator_balance -= creation_fee
         connection.execute(
             """
             INSERT INTO guild_casinos
                 (
-                    guild_id, owner_id, name, currency_name, treasury,
+                    guild_id, BOT_OWNER_ID, name, currency_name, treasury,
                     npc_next_bet_at
                 )
             VALUES (?, ?, ?, ?, ?, ?)
@@ -3167,7 +3273,7 @@ def create_guild_casino(
             ),
         )
         return "created", creator_balance, house_balance + (
-            creation_fee if creator_id != house_owner_id else 0
+            creation_fee if creator_id != house_BOT_OWNER_ID else 0
         )
 
 
@@ -3179,7 +3285,7 @@ def delete_guild_casino(
         connection.execute("BEGIN IMMEDIATE")
         casino = connection.execute(
             """
-            SELECT owner_id, treasury
+            SELECT BOT_OWNER_ID, treasury
             FROM guild_casinos WHERE guild_id = ?
             """,
             (guild_id,),
@@ -3187,8 +3293,8 @@ def delete_guild_casino(
         if casino is None:
             return "missing", 0, 0
 
-        owner_id, treasury = casino
-        if owner_id != user_id:
+        BOT_OWNER_ID, treasury = casino
+        if BOT_OWNER_ID != user_id:
             return "not_owner", 0, 0
         if treasury < 0:
             raise RuntimeError(
@@ -3296,16 +3402,16 @@ def get_guild_casino_leaderboard(
 ) -> tuple[str, str, list[tuple[int, int, int, int]]] | None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection, connection:
         casino = connection.execute(
-            "SELECT owner_id, name, currency_name FROM guild_casinos WHERE guild_id = ?",
+            "SELECT BOT_OWNER_ID, name, currency_name FROM guild_casinos WHERE guild_id = ?",
             (guild_id,),
         ).fetchone()
         if casino is None:
             return None
-        owner_id, name, currency_name = casino
+        BOT_OWNER_ID, name, currency_name = casino
         main_house_owner = connection.execute(
-            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+            "SELECT value FROM casino_settings WHERE setting = 'house_BOT_OWNER_ID'"
         ).fetchone()
-        main_house_owner_id = (
+        main_house_BOT_OWNER_ID = (
             main_house_owner[0] if main_house_owner is not None else -1
         )
         ranking = connection.execute(
@@ -3316,7 +3422,7 @@ def get_guild_casino_leaderboard(
             ORDER BY balance DESC, total_earned DESC, total_lost ASC, user_id ASC
             LIMIT 10
             """,
-            (guild_id, owner_id, main_house_owner_id),
+            (guild_id, BOT_OWNER_ID, main_house_BOT_OWNER_ID),
         ).fetchall()
     return name, currency_name, ranking
 
@@ -3330,15 +3436,15 @@ def upgrade_guild_casino(
         connection.execute("BEGIN IMMEDIATE")
         casino = connection.execute(
             """
-            SELECT owner_id, treasury, upgrade_level
+            SELECT BOT_OWNER_ID, treasury, upgrade_level
             FROM guild_casinos WHERE guild_id = ?
             """,
             (guild_id,),
         ).fetchone()
         if casino is None:
             return "missing", 0, 0, 0
-        owner_id, treasury, level = casino
-        if user_id != owner_id:
+        BOT_OWNER_ID, treasury, level = casino
+        if user_id != BOT_OWNER_ID:
             return "not_owner", treasury, level, 0
         if expected_level is not None and level != expected_level:
             return "changed", treasury, level, 0
@@ -3348,14 +3454,14 @@ def upgrade_guild_casino(
         if treasury < cost:
             return "insufficient", treasury, level, cost
         house_owner = connection.execute(
-            "SELECT value FROM casino_settings WHERE setting = 'house_owner_id'"
+            "SELECT value FROM casino_settings WHERE setting = 'house_BOT_OWNER_ID'"
         ).fetchone()
         if house_owner is None:
             raise RuntimeError("O owner do bot ainda não foi carregado para a banca.")
-        house_owner_id = house_owner[0]
+        house_BOT_OWNER_ID = house_owner[0]
         connection.execute(
             "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-            (house_owner_id,),
+            (house_BOT_OWNER_ID,),
         )
         new_level = level + 1
         new_treasury = treasury - cost
@@ -3374,7 +3480,7 @@ def upgrade_guild_casino(
             SET balance = balance + ?, total_earned = total_earned + ?
             WHERE user_id = ?
             """,
-            (cost, cost, house_owner_id),
+            (cost, cost, house_BOT_OWNER_ID),
         )
         return "upgraded", new_treasury, new_level, cost
 
@@ -3382,7 +3488,7 @@ def upgrade_guild_casino(
 def settle_guild_casino_bet(
     guild_id: int,
     user_id: int,
-    house_owner_id: int,
+    house_BOT_OWNER_ID: int,
     bet: int,
     payout: int,
 ) -> tuple[str, int, int, int, int]:
@@ -3488,7 +3594,7 @@ def settle_guild_casino_bet(
         if tax:
             connection.execute(
                 "INSERT OR IGNORE INTO economy_accounts (user_id) VALUES (?)",
-                (house_owner_id,),
+                (house_BOT_OWNER_ID,),
             )
             connection.execute(
                 """
@@ -3496,7 +3602,7 @@ def settle_guild_casino_bet(
                 SET balance = balance + ?, total_earned = total_earned + ?
                 WHERE user_id = ?
                 """,
-                (tax, tax, house_owner_id),
+                (tax, tax, house_BOT_OWNER_ID),
             )
         return "settled", player_balance + player_change, treasury + treasury_change, tax_percent, tax
 
@@ -3594,14 +3700,14 @@ def reset_player_data(reset_type: str) -> tuple[int, int]:
                 UPDATE economy_accounts SET balance = 0
                 WHERE user_id != ? AND balance != 0
                 """,
-                (BOT_OWNER_ID,),
+                (BOT_BOT_OWNER_ID,),
             ).rowcount
             local_rows = connection.execute(
                 """
                 UPDATE guild_casino_accounts SET balance = 0
                 WHERE user_id != ? AND balance != 0
                 """,
-                (BOT_OWNER_ID,),
+                (BOT_BOT_OWNER_ID,),
             ).rowcount
             return global_rows, local_rows
 
@@ -3679,7 +3785,7 @@ class BlackjackView(discord.ui.View):
         player_cards: list[str],
         dealer_cards: list[str],
         balance: int,
-        house_owner_id: int,
+        house_BOT_OWNER_ID: int,
         reservation_id: str,
         win_streak: int,
     ) -> None:
@@ -3689,7 +3795,7 @@ class BlackjackView(discord.ui.View):
         self.player_cards = player_cards
         self.dealer_cards = dealer_cards
         self.balance = balance
-        self.house_owner_id = house_owner_id
+        self.house_BOT_OWNER_ID = house_BOT_OWNER_ID
         self.reservation_id = reservation_id
         self.win_streak = win_streak
         self.streak_bonus_percent = 0
@@ -3861,7 +3967,7 @@ class BlackjackView(discord.ui.View):
         self.balance = settle_blackjack_bet(
             self.reservation_id,
             self.user.id,
-            self.house_owner_id,
+            self.house_BOT_OWNER_ID,
             self.bet,
             self.payout,
         )
@@ -3947,7 +4053,7 @@ class BlackjackView(discord.ui.View):
             self.balance = settle_blackjack_bet(
                 self.reservation_id,
                 self.user.id,
-                self.house_owner_id,
+                self.house_BOT_OWNER_ID,
                 self.bet,
                 self.bet,
             )
@@ -4144,16 +4250,16 @@ class DeleteGuildCasinoView(discord.ui.View):
     def __init__(
         self,
         guild_id: int,
-        owner_id: int,
+        BOT_OWNER_ID: int,
         casino_name: str,
     ) -> None:
         super().__init__(timeout=60)
         self.guild_id = guild_id
-        self.owner_id = owner_id
+        self.BOT_OWNER_ID = BOT_OWNER_ID
         self.casino_name = casino_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
+        if interaction.user.id == self.BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
             "Somente quem iniciou a exclusão pode confirmá-la.",
@@ -4707,13 +4813,13 @@ class BotDiscord(discord.Client):
         intents.presences = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.house_owner_id: int | None = None
+        self.house_BOT_OWNER_ID: int | None = None
         self.npc_betting_task: asyncio.Task[None] | None = None
         self.pending_update_announcement: str | None = None
 
     async def setup_hook(self) -> None:
-        self.house_owner_id = BOT_OWNER_ID
-        set_house_owner_id(self.house_owner_id)
+        self.house_BOT_OWNER_ID = BOT_BOT_OWNER_ID
+        set_house_BOT_OWNER_ID(self.house_BOT_OWNER_ID)
 
         try:
             previous_update = get_last_announced_update()
@@ -4837,7 +4943,7 @@ class BotDiscord(discord.Client):
     async def npc_betting_loop(self) -> None:
         while not self.is_closed():
             try:
-                online_owner_ids_by_guild = {
+                online_BOT_OWNER_IDs_by_guild = {
                     guild.id: {
                         member.id
                         for member in guild.members
@@ -4846,12 +4952,12 @@ class BotDiscord(discord.Client):
                     for guild in self.guilds
                 }
                 main_house_online = any(
-                    BOT_OWNER_ID in owner_ids
-                    for owner_ids in online_owner_ids_by_guild.values()
+                    BOT_BOT_OWNER_ID in BOT_OWNER_IDs
+                    for BOT_OWNER_IDs in online_BOT_OWNER_IDs_by_guild.values()
                 )
                 main_bets, local_bets = run_npc_betting_cycle(
                     main_house_online=main_house_online,
-                    online_owner_ids_by_guild=online_owner_ids_by_guild,
+                    online_BOT_OWNER_IDs_by_guild=online_BOT_OWNER_IDs_by_guild,
                 )
                 if main_bets or local_bets:
                     logger.info(
@@ -5370,7 +5476,7 @@ class DuelAgainView(discord.ui.View):
 
 
 async def is_bot_owner(interaction: discord.Interaction) -> bool:
-    return interaction.user.id == BOT_OWNER_ID
+    return interaction.user.id == BOT_BOT_OWNER_ID
 
 
 def violates_moderation_hierarchy(
@@ -5394,7 +5500,7 @@ def violates_moderation_hierarchy(
     description="Reinicie seus saldos em troca de bônus permanentes.",
 )
 async def prestigio(interaction: discord.Interaction) -> None:
-    if interaction.user.id == BOT_OWNER_ID:
+    if interaction.user.id == BOT_BOT_OWNER_ID:
         await interaction.response.send_message(
             "A conta do owner representa o saldo da casa principal e não pode "
             "ser prestigada.",
@@ -5469,7 +5575,7 @@ async def upgrade_prestigio(
     interaction: discord.Interaction,
     upgrade: app_commands.Choice[str],
 ) -> None:
-    if interaction.user.id == BOT_OWNER_ID:
+    if interaction.user.id == BOT_BOT_OWNER_ID:
         await interaction.response.send_message(
             "A casa principal não usa a árvore de upgrades de prestígio dos jogadores.",
             ephemeral=True,
@@ -5675,7 +5781,7 @@ class JobSelect(discord.ui.Select):
 async def mudar_trabalho(interaction: discord.Interaction) -> None:
     with closing(sqlite3.connect(ECONOMY_DB_PATH)) as connection:
         owns_casino = connection.execute(
-            "SELECT 1 FROM guild_casinos WHERE owner_id = ? LIMIT 1",
+            "SELECT 1 FROM guild_casinos WHERE BOT_OWNER_ID = ? LIMIT 1",
             (interaction.user.id,),
         ).fetchone()
     if owns_casino is not None:
@@ -5809,13 +5915,13 @@ async def roubar(interaction: discord.Interaction) -> None:
 
 
 class PlayerDataResetView(discord.ui.View):
-    def __init__(self, owner_id: int, reset_type: str) -> None:
+    def __init__(self, BOT_OWNER_ID: int, reset_type: str) -> None:
         super().__init__(timeout=60)
-        self.owner_id = owner_id
+        self.BOT_OWNER_ID = BOT_OWNER_ID
         self.reset_type = reset_type
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id == BOT_OWNER_ID:
+        if interaction.user.id == self.BOT_OWNER_ID == BOT_BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
             "Somente o owner do bot pode confirmar este reset.",
@@ -6647,7 +6753,7 @@ async def criar_cassino(
     status, balance, _ = create_guild_casino(
         guild.id,
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         nome.strip(),
         moeda.strip(),
     )
@@ -6701,8 +6807,8 @@ async def excluir_cassino(interaction: discord.Interaction) -> None:
         )
         return
 
-    owner_id, name, currency_name, treasury, _ = casino
-    if interaction.user.id != owner_id:
+    BOT_OWNER_ID, name, currency_name, treasury, _ = casino
+    if interaction.user.id != BOT_OWNER_ID:
         await interaction.response.send_message(
             "Somente o proprietário do cassino pode excluí-lo.",
             ephemeral=True,
@@ -6716,7 +6822,7 @@ async def excluir_cassino(interaction: discord.Interaction) -> None:
         "locais dos jogadores e o histórico deste cassino serão apagados "
         "permanentemente. O valor transferido será o caixa no momento da "
         "confirmação.",
-        view=DeleteGuildCasinoView(guild.id, owner_id, name),
+        view=DeleteGuildCasinoView(guild.id, BOT_OWNER_ID, name),
         ephemeral=True,
     )
 
@@ -6811,11 +6917,11 @@ async def solicitar_jogo_cassino(
         return
 
     await interaction.response.defer(ephemeral=True)
-    house_owner_id = get_house_owner_id()
-    owner = bot.get_user(house_owner_id)
+    house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
+    owner = bot.get_user(house_BOT_OWNER_ID)
     if owner is None:
         try:
-            owner = await bot.fetch_user(house_owner_id)
+            owner = await bot.fetch_user(house_BOT_OWNER_ID)
         except discord.HTTPException as error:
             logger.error(
                 "Não foi possível localizar o dono do bot para encaminhar um pedido de jogo.",
@@ -6902,11 +7008,11 @@ async def feedback(
         return
 
     await interaction.response.defer(ephemeral=True)
-    house_owner_id = get_house_owner_id()
-    owner = bot.get_user(house_owner_id)
+    house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
+    owner = bot.get_user(house_BOT_OWNER_ID)
     if owner is None:
         try:
-            owner = await bot.fetch_user(house_owner_id)
+            owner = await bot.fetch_user(house_BOT_OWNER_ID)
         except discord.HTTPException as error:
             logger.error(
                 "Não foi possível localizar o dono do bot para encaminhar feedback.",
@@ -7100,7 +7206,7 @@ async def status_cassino(interaction: discord.Interaction) -> None:
         return
 
     (
-        owner_id,
+        BOT_OWNER_ID,
         name,
         currency_name,
         treasury,
@@ -7119,7 +7225,7 @@ async def status_cassino(interaction: discord.Interaction) -> None:
         player_bet_earned,
         player_bet_lost,
     ) = status
-    if interaction.user.id != owner_id:
+    if interaction.user.id != BOT_OWNER_ID:
         await interaction.response.send_message(
             "Somente o proprietário do cassino pode ver estas estatísticas.",
             ephemeral=True,
@@ -7266,14 +7372,14 @@ def create_guild_casino_upgrade_embed(
 
 
 class GuildCasinoUpgradeView(discord.ui.View):
-    def __init__(self, guild_id: int, owner_id: int, expected_level: int) -> None:
+    def __init__(self, guild_id: int, BOT_OWNER_ID: int, expected_level: int) -> None:
         super().__init__(timeout=120)
         self.guild_id = guild_id
-        self.owner_id = owner_id
+        self.BOT_OWNER_ID = BOT_OWNER_ID
         self.expected_level = expected_level
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
+        if interaction.user.id == self.BOT_OWNER_ID:
             return True
         await interaction.response.send_message(
             "Somente o proprietário do cassino pode confirmar este upgrade.",
@@ -7293,7 +7399,7 @@ class GuildCasinoUpgradeView(discord.ui.View):
     ) -> None:
         status, treasury, level, cost = upgrade_guild_casino(
             self.guild_id,
-            self.owner_id,
+            self.BOT_OWNER_ID,
             self.expected_level,
         )
         if status == "upgraded":
@@ -7320,7 +7426,7 @@ class GuildCasinoUpgradeView(discord.ui.View):
                     )
                     next_view = GuildCasinoUpgradeView(
                         self.guild_id,
-                        self.owner_id,
+                        self.BOT_OWNER_ID,
                         level,
                     )
                     next_embed = create_guild_casino_upgrade_embed(
@@ -7402,8 +7508,8 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
         message = "Este servidor ainda não tem um cassino. Use `/criar_cassino`."
         await interaction.response.send_message(message, ephemeral=True)
         return
-    owner_id, _, currency_name, treasury, level = casino
-    if interaction.user.id != owner_id:
+    BOT_OWNER_ID, _, currency_name, treasury, level = casino
+    if interaction.user.id != BOT_OWNER_ID:
         message = "Somente o proprietário do cassino pode comprar upgrades."
         await interaction.response.send_message(message, ephemeral=True)
         return
@@ -7423,7 +7529,7 @@ async def upgrade_cassino(interaction: discord.Interaction) -> None:
         return
     await interaction.response.send_message(
         embed=create_guild_casino_upgrade_embed(treasury, level, currency_name),
-        view=GuildCasinoUpgradeView(guild.id, owner_id, level),
+        view=GuildCasinoUpgradeView(guild.id, BOT_OWNER_ID, level),
         ephemeral=True,
     )
 
@@ -7625,7 +7731,7 @@ async def jogar_cassino(
     settlement = settle_guild_casino_bet(
         guild.id,
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -7699,7 +7805,7 @@ async def cacaniquel(
 
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -7835,7 +7941,7 @@ async def jogo_do_bixo(
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     bet_status, balance, remaining = settle_animal_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -7958,7 +8064,7 @@ async def moeda(
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -8025,7 +8131,7 @@ async def dados(
     animation = await asyncio.to_thread(render_dice_gif, roll)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -8101,7 +8207,7 @@ async def roleta(
     )
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -8180,7 +8286,7 @@ async def maior_menor(
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -8260,7 +8366,7 @@ async def jokenpo(
     payout = adjust_player_bet_payout(interaction.user.id, aposta, payout)
     settled, balance, _ = settle_house_bet(
         interaction.user.id,
-        get_house_owner_id(),
+        get_house_BOT_OWNER_ID(),
         aposta,
         payout,
     )
@@ -8357,10 +8463,10 @@ async def blackjack(
     if not await ensure_bet_limit(interaction, aposta):
         return
 
-    house_owner_id = get_house_owner_id()
+    house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
     reserved, balance, reservation_or_reason, win_streak = reserve_blackjack_bet(
         interaction.user.id,
-        house_owner_id,
+        house_BOT_OWNER_ID,
         aposta,
     )
     if not reserved:
@@ -8384,7 +8490,7 @@ async def blackjack(
         player_cards,
         dealer_cards,
         balance,
-        house_owner_id,
+        house_BOT_OWNER_ID,
         reservation_or_reason,
         win_streak,
     )
@@ -8415,10 +8521,10 @@ async def repeat_blackjack(
     if not await ensure_bet_limit(interaction, bet):
         return
 
-    house_owner_id = get_house_owner_id()
+    house_BOT_OWNER_ID = get_house_BOT_OWNER_ID()
     reserved, balance, reservation_or_reason, win_streak = reserve_blackjack_bet(
         interaction.user.id,
-        house_owner_id,
+        house_BOT_OWNER_ID,
         bet,
     )
     if not reserved:
@@ -8437,7 +8543,7 @@ async def repeat_blackjack(
         [draw_blackjack_card(), draw_blackjack_card()],
         [draw_blackjack_card(), draw_blackjack_card()],
         balance,
-        house_owner_id,
+        house_BOT_OWNER_ID,
         reservation_or_reason,
         win_streak,
     )
