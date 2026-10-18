@@ -110,6 +110,10 @@ Os comandos `/upgrade_casa_principal`, `/upgrade_cassino` e
 compra, a mensagem oferece o próximo nível do mesmo upgrade para confirmação
 quando houver saldo suficiente.
 
+A casa principal pode ter até 500 NPCs, configurados por
+`/configurar_npcs_principais` ou alcançados pelos upgrades de quantidade. O
+limite de NPCs de cada cassino de servidor continua sendo 200.
+
 ## Excluir um cassino
 
 O dono pode usar `/excluir_cassino` no servidor. O bot pede confirmação;

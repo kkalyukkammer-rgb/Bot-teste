@@ -44,12 +44,15 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "de cooldown separadamente ou todos de uma vez.\n\n"
     "Corrigida a migração de bancos antigos: reservas de blackjack e "
     "proprietários de cassinos locais mantêm compatibilidade com apostas dos NPCs.\n\n"
+    "O limite de NPCs da casa principal foi aumentado para 500; os upgrades "
+    "de quantidade agora podem chegar a esse total.\n\n"
     "ultima update da semana, mas ainda tem mais novidades chegando em breve!"
 )
 MAIN_HOUSE_STARTING_BALANCE = 1_000_000_000
 MAIN_HOUSE_UPGRADE_MAX_LEVEL = 20
 MAIN_HOUSE_UPGRADE_COST_PERCENT_PER_LEVEL = 1
 MAIN_HOUSE_UPGRADE_NPC_BONUS = 20
+MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL = 23
 PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 BLACKLIST_FILE = os.path.join(PROJECT_DIRECTORY, "blacklist.json")
 BACKUP_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "backup")
@@ -118,10 +121,11 @@ BLACKJACK_STREAK_BONUS_MAX_PERCENT = 200
 DEFAULT_CASINO_CREATION_FEE = 750_000
 DEFAULT_CASINO_TAX_PERCENT = 15
 DEFAULT_MAIN_HOUSE_NPCS = 50
+MAIN_HOUSE_MAX_NPCS = 500
 MAIN_HOUSE_NPC_BET_MIN = 5_000
 MAIN_HOUSE_NPC_BET_MAX = 20_000
 CASINO_STARTING_NPCS = 10
-CASINO_MAX_NPCS = 200
+CASINO_MAX_NPCS = 100
 CASINO_NPC_HIRE_COST = 2_000
 CASINO_NPC_MIN_NET_EARNINGS = 1_000
 CASINO_NPC_BET_MAX_MULTIPLIER = 4
@@ -1596,8 +1600,8 @@ def get_main_house_status() -> dict[str, int]:
         ),
         "next_npc_count_upgrade_cost": (
             main_house_upgrade_cost(npc_count_upgrade_level)
-            if npc_count_upgrade_level < MAIN_HOUSE_UPGRADE_MAX_LEVEL
-            and npc_count < CASINO_MAX_NPCS
+            if npc_count_upgrade_level < MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL
+            and npc_count < MAIN_HOUSE_MAX_NPCS
             else 0
         ),
         "next_npc_bet_upgrade_cost": (
@@ -1674,7 +1678,7 @@ def upgrade_main_house(
             level_setting = "main_house_npc_count_upgrade_level"
             costs_setting = "main_house_npc_count_upgrade_costs_paid"
             level = settings[level_setting]
-            if npc_count >= CASINO_MAX_NPCS:
+            if npc_count >= MAIN_HOUSE_MAX_NPCS:
                 return "max_count", 0, level, npc_count, 0
         else:
             level_setting = "main_house_npc_bet_upgrade_level"
@@ -1693,7 +1697,12 @@ def upgrade_main_house(
             and npc_count != expected_npc_count
         ):
             return "changed", balance, level, npc_count, 0
-        if level >= MAIN_HOUSE_UPGRADE_MAX_LEVEL:
+        max_level = (
+            MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL
+            if upgrade_type == "npc_count"
+            else MAIN_HOUSE_UPGRADE_MAX_LEVEL
+        )
+        if level >= max_level:
             return "max_level", balance, level, npc_count, 0
 
         cost = main_house_upgrade_cost(level)
@@ -1703,7 +1712,7 @@ def upgrade_main_house(
         new_level = level + 1
         new_npc_count = (
             min(
-                CASINO_MAX_NPCS,
+                MAIN_HOUSE_MAX_NPCS,
                 npc_count + MAIN_HOUSE_UPGRADE_NPC_BONUS,
             )
             if upgrade_type == "npc_count"
@@ -3173,8 +3182,10 @@ def hire_guild_casino_npcs(
 
 
 def set_main_house_npc_count(amount: int) -> None:
-    if not 1 <= amount <= CASINO_MAX_NPCS:
-        raise ValueError("A casa principal precisa ter entre 1 e 100 NPCs.")
+    if not 1 <= amount <= MAIN_HOUSE_MAX_NPCS:
+        raise ValueError(
+            f"A casa principal precisa ter entre 1 e {MAIN_HOUSE_MAX_NPCS} NPCs."
+        )
     with closing(sqlite3.connect(ECONOMY_DB_PATH, timeout=10)) as connection, connection:
         connection.execute(
             """
@@ -6960,11 +6971,11 @@ async def configurar_cassinos(
 )
 @app_commands.check(is_bot_owner)
 @app_commands.describe(
-    quantidade="Quantidade de NPCs da casa principal (de 1 a 100)."
+    quantidade=f"Quantidade de NPCs da casa principal (de 1 a {MAIN_HOUSE_MAX_NPCS})."
 )
 async def configurar_npcs_principais(
     interaction: discord.Interaction,
-    quantidade: app_commands.Range[int, 1, CASINO_MAX_NPCS],
+    quantidade: app_commands.Range[int, 1, MAIN_HOUSE_MAX_NPCS],
 ) -> None:
     set_main_house_npc_count(quantidade)
     await interaction.response.send_message(
@@ -7024,11 +7035,11 @@ class MainHouseUpgradeView(BlacklistView):
                 f"**{format_coins(balance)} moedas**."
             )
         elif status == "max_count":
-            message = f"A casa principal já atingiu o limite de {CASINO_MAX_NPCS} NPCs."
+            message = f"A casa principal já atingiu o limite de {MAIN_HOUSE_MAX_NPCS} NPCs."
         elif status == "max_level":
             message = (
                 f"Este tipo de upgrade já atingiu o nível máximo "
-                f"({MAIN_HOUSE_UPGRADE_MAX_LEVEL})."
+                f"({MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL if self.upgrade_type == 'npc_count' else MAIN_HOUSE_UPGRADE_MAX_LEVEL})."
             )
         else:
             message = (
@@ -7062,7 +7073,7 @@ class MainHouseUpgradeView(BlacklistView):
                 and updated_status["balance"] >= next_cost
                 and (
                     self.upgrade_type != "npc_count"
-                    or updated_status["npc_count"] < CASINO_MAX_NPCS
+                    or updated_status["npc_count"] < MAIN_HOUSE_MAX_NPCS
                 )
             )
             if can_continue:
@@ -7070,7 +7081,7 @@ class MainHouseUpgradeView(BlacklistView):
                     next_effect = (
                         f"A quantidade de NPCs passará de **"
                         f"{updated_status['npc_count']}** para **"
-                        f"{min(CASINO_MAX_NPCS, updated_status['npc_count'] + MAIN_HOUSE_UPGRADE_NPC_BONUS)}**."
+                        f"{min(MAIN_HOUSE_MAX_NPCS, updated_status['npc_count'] + MAIN_HOUSE_UPGRADE_NPC_BONUS)}**."
                     )
                     next_expected_npc_count = updated_status["npc_count"]
                 else:
@@ -7157,7 +7168,7 @@ async def upgrade_casa_principal(
         level = status["npc_count_upgrade_level"]
         current_value = status["npc_count"]
         next_value = min(
-            CASINO_MAX_NPCS,
+            MAIN_HOUSE_MAX_NPCS,
             current_value + MAIN_HOUSE_UPGRADE_NPC_BONUS,
         )
         cost = status["next_npc_count_upgrade_cost"]
@@ -7166,10 +7177,10 @@ async def upgrade_casa_principal(
             f"A quantidade de NPCs passará de **{current_value}** para "
             f"**{next_value}**."
         )
-        if current_value >= CASINO_MAX_NPCS:
+        if current_value >= MAIN_HOUSE_MAX_NPCS:
             await interaction.response.send_message(
                 f"A casa principal já atingiu o limite de "
-                f"{CASINO_MAX_NPCS} NPCs.",
+                f"{MAIN_HOUSE_MAX_NPCS} NPCs.",
                 ephemeral=True,
             )
             return
@@ -7187,9 +7198,14 @@ async def upgrade_casa_principal(
         )
 
     if cost == 0:
+        max_level = (
+            MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL
+            if tipo.value == "npc_count"
+            else MAIN_HOUSE_UPGRADE_MAX_LEVEL
+        )
         await interaction.response.send_message(
             f"Este tipo de upgrade já atingiu o nível máximo "
-            f"({MAIN_HOUSE_UPGRADE_MAX_LEVEL}).",
+            f"({max_level}).",
             ephemeral=True,
         )
         return
@@ -7289,7 +7305,7 @@ async def status_casa_principal(interaction: discord.Interaction) -> None:
         name="Upgrades da casa",
         value=(
             f"NPCs: nível **{status['npc_count_upgrade_level']}/"
-            f"{MAIN_HOUSE_UPGRADE_MAX_LEVEL}**, "
+            f"{MAIN_HOUSE_NPC_COUNT_UPGRADE_MAX_LEVEL}**, "
             f"investido **{format_coins(status['npc_count_upgrade_costs_paid'])}**"
             + (
                 f", próximo **{format_coins(status['next_npc_count_upgrade_cost'])}**"
