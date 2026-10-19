@@ -43,6 +43,7 @@ UPDATE_ANNOUNCEMENT_MESSAGE = (
     "`/maior_menor` e `/jokenpo`: retorno base x2; empates devolvem a aposta.\n"
     "Em blackjack e jokenpo de duelo, quem nao fizer a jogada antes do tempo perde a aposta; se nenhum participante do duelo jogar, ambos perdem.\n"
     "Os multiplicadores sao base e o bonus de prestigio pode aumentar o lucro.\n\n"
+    "Os botoes de repetir apostas em sequencia permitem ate 5 novas partidas.\n\n"
     "**PROTECAO CONTRA SPAM DE COMANDOS**\n\n"
     "O autoblock pode ser configurado pelo dono do bot com `/configurar_autoblock`, definindo janela, quantidade de comandos, duracao da punicao e limite de punicoes. Ao atingir o limite, o usuario fica bloqueado por 24 horas.\n\n"
     "O desafio anti-macro aparece no primeiro comando de cada usuario e, depois de resolvido, pode reaparecer com intervalo aleatorio de 3 a 10 minutos. Se ficar sem resposta, o bot mantem o mesmo desafio para uma tentativa posterior.\n\n"
@@ -2418,6 +2419,9 @@ async def send_bet_result(
             )
 
 
+MAX_GAME_REPLAYS = 5
+
+
 class BetAgainView(BlacklistView):
     def __init__(
         self,
@@ -2426,6 +2430,7 @@ class BetAgainView(BlacklistView):
         bet: int,
         choice: str | tuple[str, ...],
         guild_id: int | None = None,
+        repeat_count: int = 0,
     ) -> None:
         super().__init__(timeout=300)
         self.user_id = user_id
@@ -2433,6 +2438,12 @@ class BetAgainView(BlacklistView):
         self.bet = bet
         self.choice = choice
         self.guild_id = guild_id
+        self.repeat_count = repeat_count
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+                    item.label = "Limite de 5 repeticoes atingido"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
@@ -2457,12 +2468,19 @@ class BetAgainView(BlacklistView):
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            await interaction.response.send_message(
+                "Esta sequencia ja atingiu o limite de 5 apostas repetidas.",
+                ephemeral=True,
+            )
+            return
         await repeat_bet(
             interaction,
             self.game,
             self.bet,
             self.choice,
             guild_id=self.guild_id,
+            repeat_count=self.repeat_count,
         )
 
 
@@ -2473,7 +2491,14 @@ async def repeat_bet(
     choice: str | tuple[str, ...],
     *,
     guild_id: int | None = None,
+    repeat_count: int = 0,
 ) -> None:
+    if repeat_count >= MAX_GAME_REPLAYS:
+        await interaction.response.send_message(
+            "Esta sequencia ja atingiu o limite de 5 apostas repetidas.",
+            ephemeral=True,
+        )
+        return
     if not await ensure_betting_channel(interaction):
         return
     if guild_id is None and not await ensure_not_house_owner(interaction):
@@ -2699,6 +2724,7 @@ async def repeat_bet(
                 bet,
                 choice,
                 guild_id,
+                repeat_count + 1,
             ),
             edit_message=True,
             file=file,
@@ -2734,7 +2760,13 @@ async def repeat_bet(
         result=result,
         payout=payout,
         balance=balance,
-        view=BetAgainView(interaction.user.id, game, bet, choice),
+        view=BetAgainView(
+            interaction.user.id,
+            game,
+            bet,
+            choice,
+            repeat_count=repeat_count + 1,
+        ),
         edit_message=True,
         file=file,
         image_url=image_url,
@@ -4479,6 +4511,7 @@ class BlackjackView(BlacklistView):
         house_BOT_OWNER_ID: int,
         reservation_id: str,
         win_streak: int,
+        repeat_count: int = 0,
     ) -> None:
         super().__init__(timeout=90)
         self.user = user
@@ -4489,6 +4522,7 @@ class BlackjackView(BlacklistView):
         self.house_BOT_OWNER_ID = house_BOT_OWNER_ID
         self.reservation_id = reservation_id
         self.win_streak = win_streak
+        self.repeat_count = repeat_count
         self.streak_bonus_percent = 0
         self.message: discord.InteractionMessage | None = None
         self.finished = False
@@ -4706,7 +4740,11 @@ class BlackjackView(BlacklistView):
             await interaction.response.edit_message(
                 embed=self.create_embed(),
                 view=(
-                    BlackjackAgainView(self.user.id, self.bet)
+                    BlackjackAgainView(
+                        self.user.id,
+                        self.bet,
+                        repeat_count=self.repeat_count,
+                    )
                     if self.finished
                     else self
                 ),
@@ -4762,15 +4800,30 @@ class BlackjackView(BlacklistView):
             if self.message is not None:
                 await self.message.edit(
                     embed=self.create_embed(),
-                    view=BlackjackAgainView(self.user.id, self.bet),
+                    view=BlackjackAgainView(
+                        self.user.id,
+                        self.bet,
+                        repeat_count=self.repeat_count,
+                    ),
                 )
 
 
 class BlackjackAgainView(BlacklistView):
-    def __init__(self, user_id: int, bet: int) -> None:
+    def __init__(
+        self,
+        user_id: int,
+        bet: int,
+        repeat_count: int = 0,
+    ) -> None:
         super().__init__(timeout=300)
         self.user_id = user_id
         self.bet = bet
+        self.repeat_count = repeat_count
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+                    item.label = "Limite de 5 repeticoes atingido"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
@@ -4795,7 +4848,17 @@ class BlackjackAgainView(BlacklistView):
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
-        await repeat_blackjack(interaction, self.bet)
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            await interaction.response.send_message(
+                "Esta sequencia ja atingiu o limite de 5 partidas repetidas.",
+                ephemeral=True,
+            )
+            return
+        await repeat_blackjack(
+            interaction,
+            self.bet,
+            repeat_count=self.repeat_count,
+        )
 
 
 class PrestigeConfirmView(BlacklistView):
@@ -6001,12 +6064,14 @@ class DuelView(BlacklistView):
         opponent: discord.User | discord.Member,
         bet: int,
         game: str,
+        repeat_count: int = 0,
     ) -> None:
         super().__init__(timeout=120)
         self.challenger = challenger
         self.opponent = opponent
         self.bet = bet
         self.game = game
+        self.repeat_count = repeat_count
         self.accepted = False
         self.finished = False
         self.choices: dict[int, str] = {}
@@ -6081,6 +6146,7 @@ class DuelView(BlacklistView):
             self.opponent,
             self.bet,
             self.game,
+            repeat_count=self.repeat_count,
         )
 
     async def _finish_round(
@@ -6437,12 +6503,19 @@ class DuelAgainView(BlacklistView):
         opponent: discord.User | discord.Member,
         bet: int,
         game: str,
+        repeat_count: int = 0,
     ) -> None:
         super().__init__(timeout=300)
         self.challenger = challenger
         self.opponent = opponent
         self.bet = bet
         self.game = game
+        self.repeat_count = repeat_count
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+                    item.label = "Limite de 5 repeticoes atingido"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if await verificar_usuario_bloqueado(interaction):
@@ -6467,6 +6540,12 @@ class DuelAgainView(BlacklistView):
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
+        if self.repeat_count >= MAX_GAME_REPLAYS:
+            await interaction.response.send_message(
+                "Esta sequencia ja atingiu o limite de 5 desafios repetidos.",
+                ephemeral=True,
+            )
+            return
         if not await ensure_betting_channel(interaction):
             return
         challenger_limit = get_player_bet_limit(self.challenger.id)
@@ -6478,7 +6557,13 @@ class DuelAgainView(BlacklistView):
                 ephemeral=True,
             )
             return
-        view = DuelView(self.challenger, self.opponent, self.bet, self.game)
+        view = DuelView(
+            self.challenger,
+            self.opponent,
+            self.bet,
+            self.game,
+            repeat_count=self.repeat_count + 1,
+        )
         await interaction.response.edit_message(
             embed=view.create_embed(),
             view=view,
@@ -9801,7 +9886,11 @@ async def blackjack(
     await interaction.response.send_message(
         embed=game.create_embed(),
         view=(
-            BlackjackAgainView(interaction.user.id, aposta)
+            BlackjackAgainView(
+                interaction.user.id,
+                aposta,
+                repeat_count=game.repeat_count,
+            )
             if game.finished
             else game
         ),
@@ -9813,7 +9902,15 @@ async def blackjack(
 async def repeat_blackjack(
     interaction: discord.Interaction,
     bet: int,
+    *,
+    repeat_count: int = 0,
 ) -> None:
+    if repeat_count >= MAX_GAME_REPLAYS:
+        await interaction.response.send_message(
+            "Esta sequencia ja atingiu o limite de 5 partidas repetidas.",
+            ephemeral=True,
+        )
+        return
     if not await ensure_betting_channel(interaction):
         return
     if not await ensure_not_house_owner(interaction):
@@ -9846,6 +9943,7 @@ async def repeat_blackjack(
         house_BOT_OWNER_ID,
         reservation_or_reason,
         win_streak,
+        repeat_count + 1,
     )
     if hand_total(game.player_cards) == 21:
         game.result = "Blackjack! Sua mão inicial chegou a 21."
@@ -9854,7 +9952,11 @@ async def repeat_blackjack(
     await interaction.response.edit_message(
         embed=game.create_embed(),
         view=(
-            BlackjackAgainView(interaction.user.id, bet)
+            BlackjackAgainView(
+                interaction.user.id,
+                bet,
+                repeat_count=game.repeat_count,
+            )
             if game.finished
             else game
         ),
